@@ -1,0 +1,24 @@
+{
+  "name": "jarvis-second-brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @jarvis/api --filter @jarvis/web dev",
+    "dev:api": "pnpm --filter @jarvis/api dev",
+    "dev:web": "pnpm --filter @jarvis/web dev",
+    "dev:ml": ".venv/bin/python -m uvicorn app.main:app --app-dir workers/ml --reload --host 0.0.0.0 --port 8001",
+    "build": "pnpm -r build",
+    "check": "pnpm -r check",
+    "test": "pnpm -r test",
+    "db:migrate": "pnpm --filter @jarvis/db migrate",
+    "audit:verify": "pnpm --filter @jarvis/audit verify"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
