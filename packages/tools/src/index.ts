@@ -1,15 +1,34 @@
-import { classifyTool } from "@jarvis/policy";
-import type { ApprovalRequest, ToolCallProposal, ToolResult } from "@jarvis/shared";
+import type { ApprovalMode, ApprovalRequest, RiskLevel, ToolCallProposal, ToolResult } from "@jarvis/shared";
+import { z } from "zod";
 import { createSafeGoogleTools } from "./google.js";
+import { createFinanceTools } from "./finance.js";
+import { createSearchTools } from "./search.js";
+import { createTeslaTools } from "./tesla.js";
 
 export { getGoogleAuthUrl, GOOGLE_SAFE_SCOPES, hasGoogleOAuthConfig, saveGoogleTokensFromCode } from "./google.js";
 
 export interface ToolDefinition {
   name: string;
+  provider: string;
   operation: string;
   description: string;
+  requiredScopes: string[];
+  riskLevel: RiskLevel;
+  approvalMode: ApprovalMode;
+  argsSchema: z.ZodType<Record<string, unknown>>;
   execute: (args: Record<string, unknown>) => Promise<unknown>;
   dryRun: (args: Record<string, unknown>) => string;
+}
+
+export interface PublicToolDefinition {
+  name: string;
+  provider: string;
+  operation: string;
+  description: string;
+  requiredScopes: string[];
+  riskLevel: RiskLevel;
+  approvalMode: ApprovalMode;
+  argsSchema: unknown;
 }
 
 export interface ToolGatewayDecision {
@@ -28,6 +47,19 @@ export function listTools(): ToolDefinition[] {
   return [...toolRegistry.values()];
 }
 
+export function listPublicTools(): PublicToolDefinition[] {
+  return listTools().map((tool) => ({
+    name: tool.name,
+    provider: tool.provider,
+    operation: tool.operation,
+    description: tool.description,
+    requiredScopes: tool.requiredScopes,
+    riskLevel: tool.riskLevel,
+    approvalMode: tool.approvalMode,
+    argsSchema: zodSchemaToHint(tool.argsSchema)
+  }));
+}
+
 export async function proposeAndMaybeExecuteTool(input: {
   sessionId: string;
   correlationId: string;
@@ -39,18 +71,23 @@ export async function proposeAndMaybeExecuteTool(input: {
     throw new Error(`Unknown tool: ${input.toolName}`);
   }
 
-  const policy = classifyTool(tool.name, tool.operation, input.args);
+  const args = tool.argsSchema.parse(input.args);
   const proposal: ToolCallProposal = {
     id: crypto.randomUUID(),
     sessionId: input.sessionId,
     correlationId: input.correlationId,
+    provider: tool.provider,
     toolName: tool.name,
     operation: tool.operation,
-    args: input.args,
-    riskLevel: policy.riskLevel,
-    approvalMode: policy.approvalMode,
-    dryRunSummary: tool.dryRun(input.args),
-    createdAt: new Date().toISOString()
+    args,
+    requiredScopes: tool.requiredScopes,
+    riskLevel: tool.riskLevel,
+    approvalMode: tool.approvalMode,
+    status: tool.approvalMode === "manual" ? "queued_for_approval" : "proposed",
+    dryRunSummary: tool.dryRun(args),
+    createdAt: new Date().toISOString(),
+    decidedAt: null,
+    executedAt: null
   };
 
   if (proposal.approvalMode === "manual") {
@@ -76,20 +113,45 @@ export async function proposeAndMaybeExecuteTool(input: {
     };
   }
 
-  const data = await tool.execute(input.args);
+  const result = await executeRegisteredTool(proposal);
   return {
     proposal,
-    result: {
+    result
+  };
+}
+
+export async function executeRegisteredTool(proposal: ToolCallProposal): Promise<ToolResult> {
+  const tool = toolRegistry.get(proposal.toolName);
+  if (!tool) {
+    return {
+      proposalId: proposal.id,
+      toolName: proposal.toolName,
+      status: "failed",
+      notification: `Unknown tool: ${proposal.toolName}`
+    };
+  }
+
+  try {
+    const args = tool.argsSchema.parse(proposal.args);
+    const data = await tool.execute(args);
+    return {
       proposalId: proposal.id,
       toolName: tool.name,
       status: "executed",
       notification:
         proposal.approvalMode === "notify"
-          ? `Auto-executed low-risk tool with notification: ${proposal.dryRunSummary}`
-          : `Auto-executed read-only tool: ${proposal.dryRunSummary}`,
+          ? `Executed with notification: ${proposal.dryRunSummary}`
+          : `Executed: ${proposal.dryRunSummary}`,
       data
-    }
-  };
+    };
+  } catch (error) {
+    return {
+      proposalId: proposal.id,
+      toolName: proposal.toolName,
+      status: "failed",
+      notification: error instanceof Error ? error.message : "Tool execution failed."
+    };
+  }
 }
 
 export function registerDefaultTools(): void {
@@ -97,23 +159,53 @@ export function registerDefaultTools(): void {
     registerTool(tool);
   }
 
-  registerTool({
-    name: "apple.messages.send",
-    operation: "send message",
-    description: "Future Apple companion send-message contract. Always requires approval.",
-    dryRun: (args) => `Would send an Apple Message with args ${JSON.stringify(args)}.`,
-    execute: async () => {
-      throw new Error("Apple sending is disabled in the skeleton.");
-    }
-  });
+  for (const tool of createSearchTools()) {
+    registerTool(tool);
+  }
 
-  registerTool({
-    name: "tesla.vehicle.command",
-    operation: "tesla vehicle command",
-    description: "Future Tesla command contract. Always requires approval.",
-    dryRun: (args) => `Would issue Tesla vehicle command with args ${JSON.stringify(args)}.`,
-    execute: async () => {
-      throw new Error("Tesla commands are disabled in the skeleton.");
-    }
-  });
+  for (const tool of createTeslaTools()) {
+    registerTool(tool);
+  }
+
+  for (const tool of createFinanceTools()) {
+    registerTool(tool);
+  }
+}
+
+function zodSchemaToHint(schema: z.ZodType<Record<string, unknown>>): unknown {
+  if (schema instanceof z.ZodObject) {
+    return Object.fromEntries(
+      Object.entries(schema.shape).map(([key, value]) => [key, describeZodType(value as z.ZodTypeAny)])
+    );
+  }
+
+  return { type: "object" };
+}
+
+function describeZodType(schema: z.ZodTypeAny): string {
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodDefault) {
+    return `${describeZodType(schema._def.innerType)}?`;
+  }
+
+  if (schema instanceof z.ZodString) {
+    return "string";
+  }
+
+  if (schema instanceof z.ZodNumber) {
+    return "number";
+  }
+
+  if (schema instanceof z.ZodBoolean) {
+    return "boolean";
+  }
+
+  if (schema instanceof z.ZodEnum) {
+    return schema.options.join(" | ");
+  }
+
+  if (schema instanceof z.ZodArray) {
+    return "array";
+  }
+
+  return "unknown";
 }

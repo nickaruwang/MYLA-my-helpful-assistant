@@ -1,11 +1,11 @@
 import { migrate, openDatabase } from "@jarvis/db";
 import { verifyAuditChain } from "./index.js";
 
-const db = openDatabase();
-migrate(db);
+const db = await openDatabase();
+await migrate(db);
 
-const result = verifyAuditChain(db);
-db.close();
+const result = await verifyAuditChain(db);
+await db.close();
 
 if (!result.ok) {
   console.error(`Audit verification failed at seq ${result.failedAtSeq}.`);

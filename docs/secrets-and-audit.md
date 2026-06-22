@@ -14,13 +14,13 @@ Never store these in prompts, audit payloads, or n8n workflow JSON:
 
 ## Audit Log
 
-The audit log is stored in SQLite in `audit_events`.
+The audit log is stored in MongoDB in `audit_events`.
 
 Properties:
 
 - Append-only application path.
-- SQLite triggers reject `UPDATE` and `DELETE`.
-- Each row contains the previous row hash.
+- Application code only inserts audit documents.
+- Each document contains the previous document hash.
 - Each hash covers stable metadata and the payload digest.
 - `AUDIT_HMAC_KEY` can make hashes keyed.
 

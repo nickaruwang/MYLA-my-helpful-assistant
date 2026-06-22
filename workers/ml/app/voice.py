@@ -14,11 +14,11 @@ class VoicePipelineStatus:
 
 def get_voice_status() -> VoicePipelineStatus:
     return VoicePipelineStatus(
-        mode="disabled",
+        mode="classic_pipeline",
         ready=False,
         notes=[
-            "Voice is intentionally a contract in the skeleton.",
-            "Future modes: LiveKit Agents, classic wake/VAD/STT/TTS, or Gemma 4 native audio.",
-            "Barge-in should be handled at the realtime audio layer, not bolted onto chat requests.",
+            "The web app supports browser push-to-talk input and speech synthesis playback.",
+            "Server-side STT/TTS is not enabled yet.",
+            "Future modes: LiveKit Agents, local VAD/STT/TTS, or Gemma native audio.",
         ],
     )

@@ -20,104 +20,98 @@ export interface VerificationResult {
   actualHash?: string;
 }
 
-export function appendAuditEvent(db: JarvisDatabase, input: AppendAuditEventInput): AuditEvent {
-  const event = db.transaction(() => {
-    const last = db
-      .prepare("SELECT seq, hash FROM audit_events ORDER BY seq DESC LIMIT 1")
-      .get() as { seq: number; hash: string } | undefined;
+export async function appendAuditEvent(db: JarvisDatabase, input: AppendAuditEventInput): Promise<AuditEvent> {
+  const last = (await db.auditEvents
+    .find({}, { projection: { _id: 0, seq: 1, hash: 1 } })
+    .sort({ seq: -1 })
+    .limit(1)
+    .next()) as { seq: number; hash: string } | null;
 
-    const seq = last ? last.seq + 1 : 1;
-    const previousHash = last?.hash ?? GENESIS_HASH;
-    const payloadJson = canonicalStringify(input.payload);
-    const payloadDigest = digest(payloadJson);
-    const createdAt = nowIso();
-    const id = randomUUID();
-    const hash = hashRecord({
-      seq,
-      id,
-      actor: input.actor,
-      kind: input.kind,
-      correlationId: input.correlationId,
-      payloadDigest,
-      previousHash,
-      createdAt
-    });
+  const seq = last ? last.seq + 1 : 1;
+  const previousHash = last?.hash ?? GENESIS_HASH;
+  const payloadJson = canonicalStringify(input.payload);
+  const payloadDigest = digest(payloadJson);
+  const createdAt = nowIso();
+  const id = randomUUID();
+  const hash = hashRecord({
+    seq,
+    id,
+    actor: input.actor,
+    kind: input.kind,
+    correlationId: input.correlationId,
+    payloadDigest,
+    previousHash,
+    createdAt
+  });
 
-    db.prepare(
-      `INSERT INTO audit_events
-        (seq, id, actor, kind, correlation_id, payload_json, payload_digest, previous_hash, hash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      seq,
-      id,
-      input.actor,
-      input.kind,
-      input.correlationId,
-      payloadJson,
-      payloadDigest,
-      previousHash,
-      hash,
-      createdAt
-    );
+  const event = {
+    seq,
+    id,
+    actor: input.actor,
+    kind: input.kind,
+    correlationId: input.correlationId,
+    payload: input.payload,
+    payloadJson,
+    payloadDigest,
+    previousHash,
+    hash,
+    createdAt
+  };
 
-    return {
-      seq,
-      id,
-      actor: input.actor,
-      kind: input.kind,
-      correlationId: input.correlationId,
-      payload: input.payload,
-      payloadDigest,
-      previousHash,
-      hash,
-      createdAt
-    } satisfies AuditEvent;
-  })();
+  await db.auditEvents.insertOne(event);
 
-  return event;
+  return {
+    seq,
+    id,
+    actor: input.actor,
+    kind: input.kind,
+    correlationId: input.correlationId,
+    payload: input.payload,
+    payloadDigest,
+    previousHash,
+    hash,
+    createdAt
+  } satisfies AuditEvent;
 }
 
-export function verifyAuditChain(db: JarvisDatabase): VerificationResult {
-  const rows = db
-    .prepare(
-      `SELECT seq, id, actor, kind, correlation_id, payload_json, payload_digest, previous_hash, hash, created_at
-       FROM audit_events
-       ORDER BY seq ASC`
-    )
-    .all() as Array<{
+export async function verifyAuditChain(db: JarvisDatabase): Promise<VerificationResult> {
+  const rows = (await db.auditEvents
+    .find({}, { projection: { _id: 0 } })
+    .sort({ seq: 1 })
+    .toArray()) as unknown as Array<{
     seq: number;
     id: string;
     actor: string;
     kind: AuditEventKind;
-    correlation_id: string;
-    payload_json: string;
-    payload_digest: string;
-    previous_hash: string;
+    correlationId: string;
+    payloadJson: string;
+    payloadDigest: string;
+    previousHash: string;
     hash: string;
-    created_at: string;
+    createdAt: string;
   }>;
 
   let previousHash = GENESIS_HASH;
 
   for (const row of rows) {
-    const expectedDigest = digest(row.payload_json);
-    if (expectedDigest !== row.payload_digest) {
+    const expectedDigest = digest(row.payloadJson);
+    if (expectedDigest !== row.payloadDigest) {
       return {
         ok: false,
         checked: row.seq - 1,
         failedAtSeq: row.seq,
         expectedHash: expectedDigest,
-        actualHash: row.payload_digest
+        actualHash: row.payloadDigest
       };
     }
 
-    if (row.previous_hash !== previousHash) {
+    if (row.previousHash !== previousHash) {
       return {
         ok: false,
         checked: row.seq - 1,
         failedAtSeq: row.seq,
         expectedHash: previousHash,
-        actualHash: row.previous_hash
+        actualHash: row.previousHash
       };
     }
 
@@ -126,10 +120,10 @@ export function verifyAuditChain(db: JarvisDatabase): VerificationResult {
       id: row.id,
       actor: row.actor,
       kind: row.kind,
-      correlationId: row.correlation_id,
-      payloadDigest: row.payload_digest,
-      previousHash: row.previous_hash,
-      createdAt: row.created_at
+      correlationId: row.correlationId,
+      payloadDigest: row.payloadDigest,
+      previousHash: row.previousHash,
+      createdAt: row.createdAt
     });
 
     if (expectedHash !== row.hash) {

@@ -15,6 +15,28 @@ export type ApprovalMode = z.infer<typeof ApprovalModeSchema>;
 export const ModelRouteSchema = z.enum(["local", "hosted-fallback", "blocked"]);
 export type ModelRoute = z.infer<typeof ModelRouteSchema>;
 
+export const ToolProposalStatusSchema = z.enum([
+  "proposed",
+  "queued_for_approval",
+  "approved",
+  "rejected",
+  "executed",
+  "blocked",
+  "failed"
+]);
+export type ToolProposalStatus = z.infer<typeof ToolProposalStatusSchema>;
+
+export const InputModeSchema = z.enum(["chat", "voice"]).default("chat");
+export type InputMode = z.infer<typeof InputModeSchema>;
+
+export const SessionSchema = z.object({
+  id: z.string(),
+  title: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+export type Session = z.infer<typeof SessionSchema>;
+
 export const ChatMessageSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
@@ -53,13 +75,18 @@ export const ToolCallProposalSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
   correlationId: z.string(),
+  provider: z.string(),
   toolName: z.string(),
   operation: z.string(),
   args: z.record(z.unknown()),
+  requiredScopes: z.array(z.string()).default([]),
   riskLevel: RiskLevelSchema,
   approvalMode: ApprovalModeSchema,
+  status: ToolProposalStatusSchema,
   dryRunSummary: z.string(),
-  createdAt: z.string()
+  createdAt: z.string(),
+  decidedAt: z.string().nullable().default(null),
+  executedAt: z.string().nullable().default(null)
 });
 export type ToolCallProposal = z.infer<typeof ToolCallProposalSchema>;
 
@@ -93,6 +120,8 @@ export const AuditEventKindSchema = z.enum([
   "tool.executed",
   "approval.created",
   "approval.decided",
+  "memory.stored",
+  "memory.deleted",
   "audit.verified"
 ]);
 export type AuditEventKind = z.infer<typeof AuditEventKindSchema>;
@@ -118,15 +147,34 @@ export const MemoryFactSchema = z.object({
   object: z.string(),
   sourceMessageId: z.string().nullable(),
   confidence: z.number().min(0).max(1),
+  embeddingId: z.string().nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string()
 });
 export type MemoryFact = z.infer<typeof MemoryFactSchema>;
 
+export const MemoryRelationshipSchema = z.object({
+  id: z.string(),
+  fromEntity: z.string(),
+  relationship: z.string(),
+  toEntity: z.string(),
+  sourceFactId: z.string().nullable(),
+  confidence: z.number().min(0).max(1),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+export type MemoryRelationship = z.infer<typeof MemoryRelationshipSchema>;
+
+export const MemorySearchResultSchema = MemoryFactSchema.extend({
+  score: z.number().optional()
+});
+export type MemorySearchResult = z.infer<typeof MemorySearchResultSchema>;
+
 export const ChatRequestSchema = z.object({
   sessionId: z.string().optional(),
   message: z.string().min(1),
-  preferredModel: z.string().optional()
+  preferredModel: z.string().optional(),
+  inputMode: InputModeSchema.optional()
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
@@ -135,6 +183,22 @@ export const ChatResponseSchema = z.object({
   correlationId: z.string(),
   message: ChatMessageSchema,
   toolResults: z.array(ToolResultSchema),
-  approvals: z.array(ApprovalRequestSchema)
+  approvals: z.array(ApprovalRequestSchema),
+  memories: z.array(MemorySearchResultSchema).default([]),
+  storedMemories: z.array(MemoryFactSchema).default([])
 });
 export type ChatResponse = z.infer<typeof ChatResponseSchema>;
+
+export const ApprovalDecisionRequestSchema = z.object({
+  decision: z.enum(["approved", "rejected"]),
+  reason: z.string().optional()
+});
+export type ApprovalDecisionRequest = z.infer<typeof ApprovalDecisionRequestSchema>;
+
+export const MemoryCreateRequestSchema = z.object({
+  subject: z.string().default("user"),
+  predicate: z.string().default("memory"),
+  object: z.string().min(1),
+  confidence: z.number().min(0).max(1).default(0.8)
+});
+export type MemoryCreateRequest = z.infer<typeof MemoryCreateRequestSchema>;

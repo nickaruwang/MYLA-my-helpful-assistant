@@ -24,6 +24,23 @@ button {
   padding: 0.75rem 1rem;
 }
 
+button.secondary {
+  background: #13243a;
+  border: 1px solid #2e4667;
+  color: #d7e7fb;
+  font-weight: 600;
+  text-align: left;
+}
+
+button.selected {
+  border-color: #6aa6ff;
+}
+
+button.danger {
+  background: #ff8a8a;
+  color: #280b0b;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
@@ -68,7 +85,7 @@ input {
 .grid {
   display: grid;
   gap: 1rem;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: 260px minmax(0, 1fr) 360px;
 }
 
 .stack {
@@ -89,7 +106,9 @@ input {
 
 .message,
 .notice,
-.approval {
+.approval,
+.memory,
+.tool {
   background: #0b1728;
   border: 1px solid #24344d;
   border-radius: 14px;
@@ -107,6 +126,36 @@ input {
 form {
   display: flex;
   gap: 0.75rem;
+}
+
+.compact-form {
+  margin-bottom: 0.75rem;
+}
+
+.list {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.memory {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.tool p,
+.memory p,
+.notice p,
+.approval p {
+  color: #a8c2e4;
+  margin: 0.35rem 0 0;
 }
 
 @media (max-width: 900px) {

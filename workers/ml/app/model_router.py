@@ -2,7 +2,7 @@ import os
 
 import httpx
 
-from app.schemas import ModelRequest, ModelResponse, TokenUsage
+from app.schemas import EmbeddingRequest, EmbeddingResponse, ModelRequest, ModelResponse, TokenUsage
 
 
 class LocalModelRouter:
@@ -10,6 +10,7 @@ class LocalModelRouter:
         self.provider = os.getenv("LOCAL_MODEL_PROVIDER", "ollama")
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         self.ollama_model = os.getenv("OLLAMA_MODEL", "gemma4:12b")
+        self.ollama_embed_model = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         if request.route == "blocked":
@@ -23,6 +24,25 @@ class LocalModelRouter:
             return await self._generate_with_ollama(request)
 
         return self._fallback(request, reason=f"Unsupported local model provider: {self.provider}")
+
+    async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        model = request.model or self.ollama_embed_model
+
+        if self.provider != "ollama":
+            return EmbeddingResponse(embedding=[], model="unsupported-provider")
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    f"{self.ollama_base_url}/api/embeddings",
+                    json={"model": model, "prompt": request.text},
+                )
+                response.raise_for_status()
+        except Exception:  # noqa: BLE001 - callers can fall back to text search.
+            return EmbeddingResponse(embedding=[], model=model)
+
+        payload = response.json()
+        return EmbeddingResponse(embedding=payload.get("embedding", []), model=model)
 
     async def _generate_with_ollama(self, request: ModelRequest) -> ModelResponse:
         model = request.preferredModel or self.ollama_model

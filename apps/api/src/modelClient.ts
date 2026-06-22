@@ -27,3 +27,24 @@ export async function callMlWorker(request: ModelRequest): Promise<ModelResponse
     };
   }
 }
+
+export async function embedText(text: string): Promise<number[] | undefined> {
+  const baseUrl = process.env.ML_WORKER_URL ?? "http://localhost:8001";
+
+  try {
+    const response = await fetch(`${baseUrl}/embed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+
+    if (!response.ok) {
+      return undefined;
+    }
+
+    const payload = (await response.json()) as { embedding?: number[] };
+    return payload.embedding?.length ? payload.embedding : undefined;
+  } catch {
+    return undefined;
+  }
+}

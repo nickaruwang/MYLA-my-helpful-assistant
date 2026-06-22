@@ -27,3 +27,13 @@ class ModelResponse(BaseModel):
     model: str
     route: ModelRoute
     usage: TokenUsage | None = None
+
+
+class EmbeddingRequest(BaseModel):
+    text: str
+    model: str | None = None
+
+
+class EmbeddingResponse(BaseModel):
+    embedding: list[float]
+    model: str

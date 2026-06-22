@@ -9,14 +9,14 @@
     "build": "tsc --noEmit",
     "check": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "migrate": "tsx src/migrate.ts"
+    "migrate": "tsx src/migrate.ts",
+    "import:sqlite": "tsx src/import-sqlite.ts"
   },
   "dependencies": {
     "@jarvis/shared": "workspace:*",
-    "better-sqlite3": "^11.7.0"
+    "mongodb": "^7.3.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }

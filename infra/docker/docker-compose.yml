@@ -6,7 +6,8 @@ services:
     env_file:
       - ../../.env
     environment:
-      DATABASE_PATH: /workspace/data/jarvis.sqlite
+      MONGODB_URI: mongodb://mongo:27017
+      QDRANT_URL: http://qdrant:6333
       ML_WORKER_URL: http://ml-worker:8001
     ports:
       - "3000:3000"
@@ -15,6 +16,8 @@ services:
       - jarvis-data:/workspace/data
     depends_on:
       - ml-worker
+      - mongo
+      - qdrant
 
   web:
     image: node:22-bookworm
@@ -42,5 +45,22 @@ services:
     volumes:
       - ../..:/workspace
 
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - jarvis-mongo:/data/db
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.6
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - jarvis-qdrant:/qdrant/storage
+
 volumes:
   jarvis-data:
+  jarvis-mongo:
+  jarvis-qdrant:

@@ -1,10 +1,12 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { google } from "googleapis";
+import { z } from "zod";
 import type { ToolDefinition } from "./index.js";
 
 export const GOOGLE_SAFE_SCOPES = [
   "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/drive.metadata.readonly",
   "https://www.googleapis.com/auth/gmail.compose"
 ] as const;
@@ -34,23 +36,34 @@ export function createSafeGoogleTools(): ToolDefinition[] {
   return [
     {
       name: "google.calendar.read_schedule",
+      provider: "google",
       operation: "read calendar schedule",
       description: "Read calendar schedule metadata for a requested date range.",
+      requiredScopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+      riskLevel: "read",
+      approvalMode: "auto",
+      argsSchema: z.object({
+        query: z.string().optional(),
+        calendarId: z.string().default("primary"),
+        timeMin: z.string().optional(),
+        timeMax: z.string().optional(),
+        maxResults: z.number().min(1).max(50).default(10)
+      }),
       dryRun: (args) => `Read calendar schedule with args ${JSON.stringify(args)}.`,
-      execute: async () => {
+      execute: async (args) => {
         const auth = getAuthorizedClientOrNull();
         if (!auth) {
           return notConfigured("calendar.read_schedule");
         }
 
         const calendar = google.calendar({ version: "v3", auth });
-        const timeMin = new Date();
-        const timeMax = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        const timeMin = new Date(asString(args.timeMin) ?? Date.now());
+        const timeMax = new Date(asString(args.timeMax) ?? Date.now() + 24 * 60 * 60 * 1000);
         const response = await calendar.events.list({
-          calendarId: "primary",
+          calendarId: asString(args.calendarId) ?? "primary",
           timeMin: timeMin.toISOString(),
           timeMax: timeMax.toISOString(),
-          maxResults: 10,
+          maxResults: asNumber(args.maxResults) ?? 10,
           singleEvents: true,
           orderBy: "startTime"
         });
@@ -69,9 +82,67 @@ export function createSafeGoogleTools(): ToolDefinition[] {
       }
     },
     {
+      name: "google.calendar.create_event",
+      provider: "google",
+      operation: "create calendar event",
+      description: "Create a Google Calendar event after manual approval.",
+      requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
+      riskLevel: "high",
+      approvalMode: "manual",
+      argsSchema: z.object({
+        calendarId: z.string().default("primary"),
+        summary: z.string(),
+        description: z.string().optional(),
+        startIso: z.string(),
+        endIso: z.string(),
+        timeZone: z.string().default("America/Los_Angeles")
+      }),
+      dryRun: (args) => `Create calendar event "${args.summary}" from ${args.startIso} to ${args.endIso}.`,
+      execute: async (args) => {
+        const auth = getAuthorizedClientOrNull();
+        if (!auth) {
+          return notConfigured("calendar.create_event");
+        }
+
+        const calendar = google.calendar({ version: "v3", auth });
+        const response = await calendar.events.insert({
+          calendarId: asString(args.calendarId) ?? "primary",
+          requestBody: {
+            summary: asString(args.summary),
+            description: asString(args.description),
+            start: {
+              dateTime: asString(args.startIso),
+              timeZone: asString(args.timeZone) ?? "America/Los_Angeles"
+            },
+            end: {
+              dateTime: asString(args.endIso),
+              timeZone: asString(args.timeZone) ?? "America/Los_Angeles"
+            }
+          }
+        });
+
+        return {
+          provider: "google",
+          tool: "calendar.create_event",
+          eventId: response.data.id,
+          htmlLink: response.data.htmlLink
+        };
+      }
+    },
+    {
       name: "google.gmail.create_draft",
+      provider: "google",
       operation: "create draft email",
       description: "Create a Gmail draft without sending it.",
+      requiredScopes: ["https://www.googleapis.com/auth/gmail.compose"],
+      riskLevel: "low",
+      approvalMode: "notify",
+      argsSchema: z.object({
+        query: z.string().optional(),
+        to: z.string().email().optional(),
+        subject: z.string().optional(),
+        body: z.string().optional()
+      }),
       dryRun: (args) => `Create a Gmail draft with args ${JSON.stringify(args)}.`,
       execute: async (args) => {
         const auth = getAuthorizedClientOrNull();
@@ -101,19 +172,29 @@ export function createSafeGoogleTools(): ToolDefinition[] {
     },
     {
       name: "google.drive.list_files",
+      provider: "google",
       operation: "list drive file metadata",
-      description: "List Google Drive file metadata without reading file contents.",
+      description: "Search Google Drive file metadata without reading file contents.",
+      requiredScopes: ["https://www.googleapis.com/auth/drive.metadata.readonly"],
+      riskLevel: "read",
+      approvalMode: "auto",
+      argsSchema: z.object({
+        query: z.string().optional(),
+        pageSize: z.number().min(1).max(100).default(10),
+        mimeType: z.string().optional()
+      }),
       dryRun: (args) => `List Drive file metadata with args ${JSON.stringify(args)}.`,
-      execute: async () => {
+      execute: async (args) => {
         const auth = getAuthorizedClientOrNull();
         if (!auth) {
           return notConfigured("drive.list_files");
         }
 
         const drive = google.drive({ version: "v3", auth });
+        const query = buildDriveQuery(args);
         const response = await drive.files.list({
-          pageSize: 10,
-          q: "trashed = false",
+          pageSize: asNumber(args.pageSize) ?? 10,
+          q: query,
           fields: "files(id,name,mimeType,modifiedTime,webViewLink)"
         });
 
@@ -170,6 +251,30 @@ function notConfigured(tool: string) {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function buildDriveQuery(args: Record<string, unknown>): string {
+  const clauses = ["trashed = false"];
+  const query = asString(args.query);
+  const mimeType = asString(args.mimeType);
+
+  if (query) {
+    clauses.push(`name contains '${escapeDriveQuery(query)}'`);
+  }
+
+  if (mimeType) {
+    clauses.push(`mimeType = '${escapeDriveQuery(mimeType)}'`);
+  }
+
+  return clauses.join(" and ");
+}
+
+function escapeDriveQuery(value: string): string {
+  return value.replace(/['\\]/g, "\\$&");
 }
 
 function encodeEmail(input: { to: string; subject: string; body: string }): string {

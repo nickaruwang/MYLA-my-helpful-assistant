@@ -1,7 +1,7 @@
 import { migrate, openDatabase } from "./index.js";
 
-const db = openDatabase();
-migrate(db);
-db.close();
+const db = await openDatabase();
+await migrate(db);
+await db.close();
 
-console.log("SQLite migrations applied.");
+console.log("MongoDB indexes applied.");
