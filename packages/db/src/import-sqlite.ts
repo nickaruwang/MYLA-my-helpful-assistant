@@ -98,6 +98,8 @@ if (proposals.length) {
             approvalMode: row.approval_mode,
             status: row.approval_mode === "manual" ? "queued_for_approval" : "executed",
             dryRunSummary: row.dry_run_summary,
+            assumptions: [],
+            plannedBy: "fallback",
             createdAt: row.created_at,
             decidedAt: null,
             executedAt: null

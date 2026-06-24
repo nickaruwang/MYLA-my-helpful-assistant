@@ -84,6 +84,8 @@ export const ToolCallProposalSchema = z.object({
   approvalMode: ApprovalModeSchema,
   status: ToolProposalStatusSchema,
   dryRunSummary: z.string(),
+  assumptions: z.array(z.string()).default([]),
+  plannedBy: z.enum(["model", "fallback", "manual"]).default("fallback"),
   createdAt: z.string(),
   decidedAt: z.string().nullable().default(null),
   executedAt: z.string().nullable().default(null)
@@ -97,7 +99,8 @@ export const ApprovalRequestSchema = z.object({
   explanation: z.string(),
   status: z.enum(["pending", "approved", "rejected", "expired"]),
   expiresAt: z.string(),
-  decidedAt: z.string().nullable().default(null)
+  decidedAt: z.string().nullable().default(null),
+  proposal: ToolCallProposalSchema.optional()
 });
 export type ApprovalRequest = z.infer<typeof ApprovalRequestSchema>;
 

@@ -45,10 +45,21 @@ export function createSafeGoogleTools(): ToolDefinition[] {
       argsSchema: z.object({
         query: z.string().optional(),
         calendarId: z.string().default("primary"),
-        timeMin: z.string().optional(),
-        timeMax: z.string().optional(),
+        timeMin: z.string().datetime({ offset: true }).optional(),
+        timeMax: z.string().datetime({ offset: true }).optional(),
         maxResults: z.number().min(1).max(50).default(10)
       }),
+      examples: [
+        {
+          user: "check my calendar for tomorrow",
+          args: {
+            calendarId: "primary",
+            timeMin: "tomorrow at 00:00 in the user's timezone",
+            timeMax: "the day after tomorrow at 00:00 in the user's timezone",
+            maxResults: 10
+          }
+        }
+      ],
       dryRun: (args) => `Read calendar schedule with args ${JSON.stringify(args)}.`,
       execute: async (args) => {
         const auth = getAuthorizedClientOrNull();
@@ -93,10 +104,28 @@ export function createSafeGoogleTools(): ToolDefinition[] {
         calendarId: z.string().default("primary"),
         summary: z.string(),
         description: z.string().optional(),
-        startIso: z.string(),
-        endIso: z.string(),
+        startIso: z.string().datetime({ offset: true }),
+        endIso: z.string().datetime({ offset: true }),
         timeZone: z.string().default("America/Los_Angeles")
       }),
+      examples: [
+        {
+          user: "block out a time tmrw from 1230 to 130 for a lunch date with sam",
+          args: {
+            calendarId: "primary",
+            summary: "lunch date with sam",
+            startIso: "tomorrow at 12:30 PM in ISO-8601 with timezone offset",
+            endIso: "tomorrow at 1:30 PM in ISO-8601 with timezone offset",
+            timeZone: "America/Los_Angeles"
+          },
+          assumptions: ["Interpreted lunch as PM."]
+        }
+      ],
+      clarificationPrompts: {
+        summary: "What should I call the calendar event?",
+        startIso: "What date and start time should I use?",
+        endIso: "What end time should I use?"
+      },
       dryRun: (args) => `Create calendar event "${args.summary}" from ${args.startIso} to ${args.endIso}.`,
       execute: async (args) => {
         const auth = getAuthorizedClientOrNull();
@@ -139,11 +168,33 @@ export function createSafeGoogleTools(): ToolDefinition[] {
       approvalMode: "notify",
       argsSchema: z.object({
         query: z.string().optional(),
-        to: z.string().email().optional(),
-        subject: z.string().optional(),
-        body: z.string().optional()
+        to: z.string().email(),
+        subject: z.string().min(1),
+        body: z.string().min(1)
       }),
-      dryRun: (args) => `Create a Gmail draft with args ${JSON.stringify(args)}.`,
+      examples: [
+        {
+          user: "draft me an email to samanthaychou@gmail.com asking about when and where we should do our dinner on friday",
+          args: {
+            to: "samanthaychou@gmail.com",
+            subject: "Dinner on Friday",
+            body: "Hi Samantha,\n\nI wanted to ask when and where we should do dinner on Friday. Let me know what works best for you.\n\nBest,\nNick"
+          }
+        }
+      ],
+      clarificationPrompts: {
+        to: "Who should I address the email to?",
+        subject: "What subject should I use?",
+        body: "What should the email say?"
+      },
+      dryRun: (args) =>
+        `Create a Gmail draft to ${args.to} with subject "${args.subject}" and body preview "${ensureEmailSignature(
+          String(args.body),
+          getEmailSignatureName()
+        ).slice(
+          0,
+          120
+        )}".`,
       execute: async (args) => {
         const auth = getAuthorizedClientOrNull();
         if (!auth) {
@@ -152,7 +203,10 @@ export function createSafeGoogleTools(): ToolDefinition[] {
 
         const to = asString(args.to) ?? "recipient@example.com";
         const subject = asString(args.subject) ?? "Draft from JARVIS";
-        const body = asString(args.body) ?? asString(args.query) ?? "Draft body goes here.";
+        const body = ensureEmailSignature(
+          asString(args.body) ?? asString(args.query) ?? "Draft body goes here.",
+          getEmailSignatureName()
+        );
         const raw = encodeEmail({ to, subject, body });
         const gmail = google.gmail({ version: "v1", auth });
         const response = await gmail.users.drafts.create({
@@ -165,8 +219,74 @@ export function createSafeGoogleTools(): ToolDefinition[] {
         return {
           provider: "google",
           tool: "gmail.create_draft",
+          to,
+          subject,
+          bodyPreview: body.slice(0, 500),
           draftId: response.data.id,
           messageId: response.data.message?.id
+        };
+      }
+    },
+    {
+      name: "google.gmail.send_draft",
+      provider: "google",
+      operation: "send gmail draft",
+      description: "Send an existing Gmail draft after human review and approval.",
+      requiredScopes: ["https://www.googleapis.com/auth/gmail.compose"],
+      riskLevel: "high",
+      approvalMode: "manual",
+      argsSchema: z.object({
+        draftId: z.string().min(1),
+        to: z.string().email().optional(),
+        subject: z.string().optional(),
+        bodyPreview: z.string().optional()
+      }),
+      examples: [
+        {
+          user: "send the reviewed draft",
+          args: {
+            draftId: "r123456789",
+            to: "samanthaychou@gmail.com",
+            subject: "Dinner on Friday",
+            bodyPreview:
+              "Hi Samantha,\n\nI wanted to ask when and where we should do dinner on Friday. Let me know what works best for you.\n\nBest,\nNick"
+          }
+        }
+      ],
+      clarificationPrompts: {
+        draftId: "Which Gmail draft should I send?"
+      },
+      dryRun: (args) =>
+        `Send Gmail draft ${args.draftId}${args.to ? ` to ${args.to}` : ""}${
+          args.subject ? ` with subject "${args.subject}"` : ""
+        }${args.bodyPreview ? ` Body preview: "${String(args.bodyPreview).slice(0, 120)}".` : "."}`,
+      execute: async (args) => {
+        const auth = getAuthorizedClientOrNull();
+        if (!auth) {
+          return notConfigured("gmail.send_draft");
+        }
+
+        const draftId = asString(args.draftId);
+        if (!draftId) {
+          throw new Error("draftId is required to send a Gmail draft.");
+        }
+
+        const gmail = google.gmail({ version: "v1", auth });
+        const response = await gmail.users.drafts.send({
+          userId: "me",
+          requestBody: {
+            id: draftId
+          }
+        });
+
+        return {
+          provider: "google",
+          tool: "gmail.send_draft",
+          draftId,
+          to: asString(args.to),
+          subject: asString(args.subject),
+          bodyPreview: asString(args.bodyPreview),
+          messageId: response.data.id
         };
       }
     },
@@ -255,6 +375,28 @@ function asString(value: unknown): string | undefined {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function getEmailSignatureName(): string {
+  return process.env.USER_DISPLAY_NAME ?? process.env.ASSISTANT_USER_NAME ?? "Nick";
+}
+
+export function ensureEmailSignature(body: string, name: string): string {
+  const trimmed = body.trimEnd();
+  if (new RegExp(`\\b${escapeRegExp(name)}\\s*$`, "i").test(trimmed)) {
+    return trimmed;
+  }
+
+  const danglingSignoff = trimmed.match(/([\s\S]*?)(\n\s*(?:best|thanks|thank you|regards|sincerely),?\s*)$/i);
+  if (danglingSignoff?.[1] !== undefined && danglingSignoff[2]) {
+    return `${danglingSignoff[1]}${danglingSignoff[2].trimEnd()}\n${name}`;
+  }
+
+  return `${trimmed}\n\nBest,\n${name}`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function buildDriveQuery(args: Record<string, unknown>): string {

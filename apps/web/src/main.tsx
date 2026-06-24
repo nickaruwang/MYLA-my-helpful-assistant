@@ -1,6 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ApprovalRequest, ChatMessage, ChatResponse, MemoryFact, Session, ToolResult } from "@jarvis/shared";
+import type {
+  ApprovalRequest,
+  ChatMessage,
+  ChatResponse,
+  MemoryFact,
+  Session,
+  ToolCallProposal,
+  ToolResult
+} from "@jarvis/shared";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
@@ -42,6 +50,8 @@ function App() {
   const [tools, setTools] = useState<PublicTool[]>([]);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>({ mode: "disabled", ready: false, notes: [] });
   const [auditStatus, setAuditStatus] = useState<string>("not checked");
+  const [runStatus, setRunStatus] = useState<string>("idle");
+  const [lastError, setLastError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
 
@@ -87,9 +97,17 @@ function App() {
     setMessages((current) => [...current, userMessage]);
     setInput("");
     setBusy(true);
+    setLastError(undefined);
+    setRunStatus("Sending request to API...");
+
+    const statusTimer = window.setInterval(() => {
+      setRunStatus("Still working...");
+    }, 10_000);
 
     try {
-      const payload = await requestChatStream({ sessionId, message: trimmed, inputMode });
+      const startedAt = performance.now();
+      const payload = await requestChat({ sessionId, message: trimmed, inputMode });
+      const elapsedSeconds = ((performance.now() - startedAt) / 1000).toFixed(1);
       setSessionId(payload.sessionId);
       setMessages((current) => [
         ...current.filter((message) => message.id !== userMessage.id),
@@ -103,35 +121,54 @@ function App() {
       setToolResults((current) => [...payload.toolResults, ...current]);
       setApprovals((current) => dedupeApprovals([...payload.approvals, ...current]));
       setMemories((current) => dedupeMemories([...payload.storedMemories, ...current]));
+      setRunStatus(
+        `Completed in ${elapsedSeconds}s. Tools: ${payload.toolResults.length}. Approvals: ${payload.approvals.length}.`
+      );
       speak(payload.message.content);
-      await Promise.all([verifyAudit(), refreshSessions(), refreshMemory()]);
+      void (async () => {
+        try {
+          await Promise.all([verifyAudit(), refreshSessions(), refreshMemory()]);
+        } catch (error) {
+          console.warn("Post-response refresh failed", error);
+        }
+      })();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Request failed.";
+      setLastError(message);
+      setRunStatus("Request failed.");
+      setMessages((current) => [
+        ...current,
+        {
+          id: `${crypto.randomUUID()}-error`,
+          sessionId: sessionId ?? "pending",
+          actor: "system",
+          content: `Request failed: ${message}`,
+          correlationId: "error",
+          createdAt: new Date().toISOString()
+        }
+      ]);
     } finally {
+      window.clearInterval(statusTimer);
       setBusy(false);
     }
   }
 
-  async function requestChatStream(body: { sessionId?: string; message: string; inputMode: "chat" | "voice" }) {
-    const response = await fetch(`${API_URL}/chat/stream`, {
+  async function requestChat(body: { sessionId?: string; message: string; inputMode: "chat" | "voice" }) {
+    const response = await fetch(`${API_URL}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body)
     });
 
-    if (!response.body) {
-      return (await response.json()) as ChatResponse;
+    const payload = (await response.json().catch(async () => ({
+      error: await response.text()
+    }))) as unknown;
+
+    if (!response.ok) {
+      throw new Error(formatApiError(payload, response.status));
     }
 
-    const text = await response.text();
-    const dataLine = text
-      .split("\n")
-      .find((line) => line.startsWith("data: "))
-      ?.replace("data: ", "");
-
-    if (!dataLine) {
-      throw new Error("Stream did not return chat data.");
-    }
-
-    return JSON.parse(dataLine) as ChatResponse;
+    return payload as ChatResponse;
   }
 
   async function refreshSessions() {
@@ -153,17 +190,43 @@ function App() {
   }
 
   async function decideApproval(approval: ApprovalRequest, decision: "approved" | "rejected") {
-    const response = await fetch(`${API_URL}/approvals/${approval.id}/decision`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ decision })
-    });
-    const payload = (await response.json()) as { toolResult?: ToolResult };
-    if (payload.toolResult) {
-      setToolResults((current) => [payload.toolResult!, ...current]);
+    try {
+      const response = await fetch(`${API_URL}/approvals/${approval.id}/decision`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision })
+      });
+      const payload = (await response.json()) as { toolResult?: ToolResult; error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? `Approval request failed with ${response.status}`);
+      }
+
+      const toolResult = payload.toolResult;
+      if (toolResult) {
+        setToolResults((current) => [toolResult, ...current]);
+        setMessages((current) => [
+          ...current,
+          {
+            id: `${crypto.randomUUID()}-approval-result`,
+            sessionId: approval.sessionId,
+            actor: "assistant",
+            content: approvalResultMessage(decision, toolResult),
+            correlationId: "approval",
+            createdAt: new Date().toISOString()
+          }
+        ]);
+      }
+      setRunStatus(decision === "approved" ? "Approval executed." : "Approval rejected.");
+      await refreshApprovals();
+      await verifyAudit();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Approval failed.";
+      setLastError(message);
+      setRunStatus("Approval failed.");
+      await refreshApprovals().catch((refreshError) => {
+        console.warn("Failed to refresh approvals after approval error", refreshError);
+      });
     }
-    await refreshApprovals();
-    await verifyAudit();
   }
 
   async function refreshMemory() {
@@ -233,6 +296,9 @@ function App() {
     localStorage.removeItem(SESSION_STORAGE_KEY);
     setSessionId(undefined);
     setMessages([]);
+    setLastError(undefined);
+    setRunStatus("idle");
+    setToolResults([]);
   }
 
   return (
@@ -277,6 +343,10 @@ function App() {
         <div className="panel chat">
           <h2>Chat</h2>
           <div className="messages">
+            <div className={lastError ? "run-status error" : "run-status"}>
+              <strong>Status:</strong> {runStatus}
+              {lastError ? <p>{lastError}</p> : null}
+            </div>
             {messages.length === 0 ? (
               <p className="muted">Try: "check my calendar", "search the latest AI news", or "remember that I prefer morning meetings".</p>
             ) : (
@@ -302,11 +372,25 @@ function App() {
             ) : (
               approvals.map((approval) => (
                 <div key={approval.id} className="approval">
-                  <strong>{approval.status}</strong>
+                  <strong>{approvalStatusLabel(approval)}</strong>
                   <p>{approval.explanation}</p>
+                  {approval.proposal ? <ApprovalPreview proposal={approval.proposal} /> : null}
                   <div className="actions">
-                    <button type="button" onClick={() => void decideApproval(approval, "approved")}>Approve</button>
-                    <button type="button" className="danger" onClick={() => void decideApproval(approval, "rejected")}>Reject</button>
+                    <button
+                      type="button"
+                      disabled={isApprovalExpired(approval)}
+                      onClick={() => void decideApproval(approval, "approved")}
+                    >
+                      Approve
+                    </button>
+                    <button
+                      type="button"
+                      className="danger"
+                      disabled={isApprovalExpired(approval)}
+                      onClick={() => void decideApproval(approval, "rejected")}
+                    >
+                      Reject
+                    </button>
                   </div>
                 </div>
               ))
@@ -322,6 +406,16 @@ function App() {
                 <div key={`${result.proposalId}-${result.status}`} className="notice">
                   <strong>{result.toolName}</strong>
                   <p>{result.notification}</p>
+                  {toolResultDetails(result).length > 0 ? (
+                    <dl className="tool-details">
+                      {toolResultDetails(result).map(([label, value]) => (
+                        <React.Fragment key={label}>
+                          <dt>{label}</dt>
+                          <dd>{value}</dd>
+                        </React.Fragment>
+                      ))}
+                    </dl>
+                  ) : null}
                 </div>
               ))
             )}
@@ -392,6 +486,141 @@ function dedupeApprovals(approvals: ApprovalRequest[]): ApprovalRequest[] {
 
 function dedupeMemories(memories: MemoryFact[]): MemoryFact[] {
   return [...new Map(memories.map((memory) => [memory.id, memory])).values()];
+}
+
+function approvalResultMessage(decision: "approved" | "rejected", result: ToolResult): string {
+  if (decision === "rejected") {
+    return `Rejected ${result.toolName}. No action was taken.`;
+  }
+
+  if (result.status === "executed") {
+    return `${result.toolName} completed: ${result.notification}`;
+  }
+
+  return `${result.toolName} returned ${result.status}: ${result.notification}`;
+}
+
+function isApprovalExpired(approval: ApprovalRequest): boolean {
+  return new Date(approval.expiresAt).getTime() < Date.now();
+}
+
+function approvalStatusLabel(approval: ApprovalRequest): string {
+  return isApprovalExpired(approval) ? "expired" : approval.status;
+}
+
+function ApprovalPreview({ proposal }: { proposal: ToolCallProposal }) {
+  const preview = approvalPreview(proposal);
+
+  return (
+    <details className="approval-preview" open>
+      <summary>Preview {preview.title}</summary>
+      {preview.fields.length > 0 ? (
+        <dl className="tool-details">
+          {preview.fields.map(([label, value]) => (
+            <React.Fragment key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      ) : null}
+      {preview.body ? <pre>{preview.body}</pre> : null}
+    </details>
+  );
+}
+
+function approvalPreview(proposal: ToolCallProposal): {
+  title: string;
+  fields: Array<[string, string]>;
+  body?: string;
+} {
+  const args = proposal.args;
+  if (proposal.toolName === "google.gmail.send_draft" || proposal.toolName === "google.gmail.create_draft") {
+    return {
+      title: "Email",
+      fields: compactFields([
+        ["To", stringValue(args.to)],
+        ["Subject", stringValue(args.subject)],
+        ["Draft ID", stringValue(args.draftId)]
+      ]),
+      body: stringValue(args.body) ?? stringValue(args.bodyPreview)
+    };
+  }
+
+  if (proposal.toolName === "google.calendar.create_event") {
+    return {
+      title: "Calendar Event",
+      fields: compactFields([
+        ["Title", stringValue(args.summary)],
+        ["Starts", stringValue(args.startIso)],
+        ["Ends", stringValue(args.endIso)],
+        ["Time zone", stringValue(args.timeZone)],
+        ["Calendar", stringValue(args.calendarId)]
+      ]),
+      body: stringValue(args.description)
+    };
+  }
+
+  return {
+    title: proposal.operation,
+    fields: compactFields([
+      ["Tool", proposal.toolName],
+      ["Risk", proposal.riskLevel],
+      ["Summary", proposal.dryRunSummary]
+    ]),
+    body: JSON.stringify(args, null, 2)
+  };
+}
+
+function compactFields(fields: Array<[string, string | undefined]>): Array<[string, string]> {
+  return fields.filter((field): field is [string, string] => Boolean(field[1]));
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function toolResultDetails(result: ToolResult): Array<[string, string]> {
+  if (!result.data || typeof result.data !== "object" || Array.isArray(result.data)) {
+    return [];
+  }
+
+  const data = result.data as Record<string, unknown>;
+  const details: Array<[string, string]> = [];
+
+  for (const key of ["to", "subject", "bodyPreview", "draftId", "messageId", "eventId", "htmlLink"]) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim()) {
+      details.push([humanizeKey(key), value]);
+    }
+  }
+
+  if (Array.isArray(data.events)) {
+    details.push(["Events", `${data.events.length}`]);
+  }
+
+  return details;
+}
+
+function humanizeKey(value: string): string {
+  return value.replace(/([A-Z])/g, " $1").replace(/^./, (first) => first.toUpperCase());
+}
+
+function formatApiError(payload: unknown, status: number): string {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return `API returned ${status}`;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const error =
+    typeof record.error === "string"
+      ? record.error
+      : typeof record.message === "string"
+        ? record.message
+        : `API returned ${status}`;
+  return [error, typeof record.requestId === "string" ? `requestId=${record.requestId}` : undefined]
+    .filter(Boolean)
+    .join(" ");
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

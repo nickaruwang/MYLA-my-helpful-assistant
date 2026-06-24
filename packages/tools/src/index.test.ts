@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { listPublicTools, proposeAndMaybeExecuteTool, registerDefaultTools } from "./index.js";
+import { ensureEmailSignature } from "./google.js";
 
 describe("tool gateway", () => {
   it("exposes schema-backed provider metadata", () => {
@@ -56,5 +57,34 @@ describe("tool gateway", () => {
     expect(decision.proposal.riskLevel).toBe("sensitive");
     expect(decision.proposal.status).toBe("queued_for_approval");
     expect(decision.result.status).toBe("queued_for_approval");
+  });
+
+  it("queues Gmail draft sending for manual approval", async () => {
+    registerDefaultTools();
+
+    const decision = await proposeAndMaybeExecuteTool({
+      sessionId: "session",
+      correlationId: "correlation",
+      toolName: "google.gmail.send_draft",
+      args: {
+        draftId: "r123",
+        to: "person@example.com",
+        subject: "Review this"
+      }
+    });
+
+    expect(decision.proposal.riskLevel).toBe("high");
+    expect(decision.proposal.approvalMode).toBe("manual");
+    expect(decision.approval?.status).toBe("pending");
+    expect(decision.result.status).toBe("queued_for_approval");
+  });
+
+  it("fills missing Gmail draft signature names", () => {
+    expect(ensureEmailSignature("Hi there,\n\nProject is moving.\n\nBest, ", "Nick")).toBe(
+      "Hi there,\n\nProject is moving.\n\nBest,\nNick"
+    );
+    expect(ensureEmailSignature("Hi there,\n\nProject is moving.\n\nBest,\nNick", "Nick")).toBe(
+      "Hi there,\n\nProject is moving.\n\nBest,\nNick"
+    );
   });
 });

@@ -8,7 +8,7 @@
     "dev": "pnpm --parallel --filter @jarvis/api --filter @jarvis/web dev",
     "dev:api": "pnpm --filter @jarvis/api dev",
     "dev:web": "pnpm --filter @jarvis/web dev",
-    "dev:ml": ".venv/bin/python -m uvicorn app.main:app --app-dir workers/ml --reload --host 0.0.0.0 --port 8001",
+    "dev:ml": "uv run --project workers/ml uvicorn app.main:app --app-dir workers/ml --reload --host 0.0.0.0 --port 8001",
     "build": "pnpm -r build",
     "check": "pnpm -r check",
     "test": "pnpm -r test",

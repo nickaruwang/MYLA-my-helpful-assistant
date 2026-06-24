@@ -21,6 +21,20 @@ export interface VerificationResult {
 }
 
 export async function appendAuditEvent(db: JarvisDatabase, input: AppendAuditEventInput): Promise<AuditEvent> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      return await appendAuditEventOnce(db, input);
+    } catch (error) {
+      if (!isDuplicateKeyError(error) || attempt === 4) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("Unable to append audit event.");
+}
+
+async function appendAuditEventOnce(db: JarvisDatabase, input: AppendAuditEventInput): Promise<AuditEvent> {
   const last = (await db.auditEvents
     .find({}, { projection: { _id: 0, seq: 1, hash: 1 } })
     .sort({ seq: -1 })
@@ -72,6 +86,10 @@ export async function appendAuditEvent(db: JarvisDatabase, input: AppendAuditEve
     hash,
     createdAt
   } satisfies AuditEvent;
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: number }).code === 11000);
 }
 
 export async function verifyAuditChain(db: JarvisDatabase): Promise<VerificationResult> {

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import httpx
 
@@ -7,6 +8,7 @@ from app.schemas import EmbeddingRequest, EmbeddingResponse, ModelRequest, Model
 
 class LocalModelRouter:
     def __init__(self) -> None:
+        load_local_env()
         self.provider = os.getenv("LOCAL_MODEL_PROVIDER", "ollama")
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         self.ollama_model = os.getenv("OLLAMA_MODEL", "gemma4:12b")
@@ -77,7 +79,9 @@ class LocalModelRouter:
         context = "\n".join(request.retrievedContext[-12:])
         return (
             "You are JARVIS, a local-first personal AI second brain. "
-            "Be concise, careful, and never claim an external action succeeded unless tool context says it did.\n\n"
+            "Use a direct, plainspoken personality. Report exactly what happened, what is pending, "
+            "and what the user needs to do next. Never claim an external action succeeded unless "
+            "tool context says it did.\n\n"
             f"Privacy class: {request.privacyClass}\n"
             f"Recent context:\n{context or '(none)'}\n\n"
             f"User request:\n{request.prompt}"
@@ -94,3 +98,21 @@ class LocalModelRouter:
             route="local",
             usage=TokenUsage(promptTokens=len(request.prompt), completionTokens=0),
         )
+
+
+def load_local_env() -> None:
+    current = Path.cwd()
+    for _ in range(5):
+        candidate = current / ".env"
+        if candidate.exists():
+            for line in candidate.read_text().splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, value = stripped.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+            return
+
+        if current.parent == current:
+            return
+        current = current.parent

@@ -16,6 +16,12 @@ export interface ToolDefinition {
   riskLevel: RiskLevel;
   approvalMode: ApprovalMode;
   argsSchema: z.ZodType<Record<string, unknown>>;
+  examples?: Array<{
+    user: string;
+    args: Record<string, unknown>;
+    assumptions?: string[];
+  }>;
+  clarificationPrompts?: Record<string, string>;
   execute: (args: Record<string, unknown>) => Promise<unknown>;
   dryRun: (args: Record<string, unknown>) => string;
 }
@@ -31,6 +37,16 @@ export interface PublicToolDefinition {
   argsSchema: unknown;
 }
 
+export interface ModelToolCard extends PublicToolDefinition {
+  requiredFields: string[];
+  examples: Array<{
+    user: string;
+    args: Record<string, unknown>;
+    assumptions?: string[];
+  }>;
+  clarificationPrompts: Record<string, string>;
+}
+
 export interface ToolGatewayDecision {
   proposal: ToolCallProposal;
   approval?: ApprovalRequest;
@@ -38,6 +54,7 @@ export interface ToolGatewayDecision {
 }
 
 const toolRegistry = new Map<string, ToolDefinition>();
+const MANUAL_APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function registerTool(tool: ToolDefinition): void {
   toolRegistry.set(tool.name, tool);
@@ -60,11 +77,33 @@ export function listPublicTools(): PublicToolDefinition[] {
   }));
 }
 
+export function listModelToolCards(): ModelToolCard[] {
+  return listTools().map((tool) => ({
+    name: tool.name,
+    provider: tool.provider,
+    operation: tool.operation,
+    description: tool.description,
+    requiredScopes: tool.requiredScopes,
+    riskLevel: tool.riskLevel,
+    approvalMode: tool.approvalMode,
+    argsSchema: zodSchemaToHint(tool.argsSchema),
+    requiredFields: requiredFieldsForSchema(tool.argsSchema),
+    examples: tool.examples ?? [],
+    clarificationPrompts: tool.clarificationPrompts ?? {}
+  }));
+}
+
+export function getToolDefinition(name: string): ToolDefinition | undefined {
+  return toolRegistry.get(name);
+}
+
 export async function proposeAndMaybeExecuteTool(input: {
   sessionId: string;
   correlationId: string;
   toolName: string;
   args: Record<string, unknown>;
+  assumptions?: string[];
+  plannedBy?: "model" | "fallback" | "manual";
 }): Promise<ToolGatewayDecision> {
   const tool = toolRegistry.get(input.toolName);
   if (!tool) {
@@ -85,6 +124,8 @@ export async function proposeAndMaybeExecuteTool(input: {
     approvalMode: tool.approvalMode,
     status: tool.approvalMode === "manual" ? "queued_for_approval" : "proposed",
     dryRunSummary: tool.dryRun(args),
+    assumptions: input.assumptions ?? [],
+    plannedBy: input.plannedBy ?? "fallback",
     createdAt: new Date().toISOString(),
     decidedAt: null,
     executedAt: null
@@ -95,9 +136,9 @@ export async function proposeAndMaybeExecuteTool(input: {
       id: crypto.randomUUID(),
       proposalId: proposal.id,
       sessionId: input.sessionId,
-      explanation: `Approval required before ${tool.name} can run: ${proposal.dryRunSummary}`,
+      explanation: `Approval required before ${tool.name} can run: ${proposal.dryRunSummary}${formatAssumptions(proposal.assumptions)}`,
       status: "pending",
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      expiresAt: new Date(Date.now() + MANUAL_APPROVAL_TTL_MS).toISOString(),
       decidedAt: null
     };
 
@@ -134,14 +175,16 @@ export async function executeRegisteredTool(proposal: ToolCallProposal): Promise
   try {
     const args = tool.argsSchema.parse(proposal.args);
     const data = await tool.execute(args);
+    const providerMessage = extractProviderMessage(data);
     return {
       proposalId: proposal.id,
       toolName: tool.name,
       status: "executed",
       notification:
-        proposal.approvalMode === "notify"
+        providerMessage ??
+        (proposal.approvalMode === "notify"
           ? `Executed with notification: ${proposal.dryRunSummary}`
-          : `Executed: ${proposal.dryRunSummary}`,
+          : `Executed: ${proposal.dryRunSummary}`),
       data
     };
   } catch (error) {
@@ -182,6 +225,28 @@ function zodSchemaToHint(schema: z.ZodType<Record<string, unknown>>): unknown {
   return { type: "object" };
 }
 
+function requiredFieldsForSchema(schema: z.ZodType<Record<string, unknown>>): string[] {
+  if (!(schema instanceof z.ZodObject)) {
+    return [];
+  }
+
+  return Object.entries(schema.shape)
+    .filter(([, value]) => !isOptionalSchema(value as z.ZodTypeAny))
+    .map(([key]) => key);
+}
+
+function isOptionalSchema(schema: z.ZodTypeAny): boolean {
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodDefault) {
+    return true;
+  }
+
+  if (schema instanceof z.ZodNullable) {
+    return isOptionalSchema(schema._def.innerType);
+  }
+
+  return false;
+}
+
 function describeZodType(schema: z.ZodTypeAny): string {
   if (schema instanceof z.ZodOptional || schema instanceof z.ZodDefault) {
     return `${describeZodType(schema._def.innerType)}?`;
@@ -208,4 +273,17 @@ function describeZodType(schema: z.ZodTypeAny): string {
   }
 
   return "unknown";
+}
+
+function extractProviderMessage(data: unknown): string | undefined {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return undefined;
+  }
+
+  const message = (data as { message?: unknown }).message;
+  return typeof message === "string" && message.trim() ? message : undefined;
+}
+
+function formatAssumptions(assumptions: string[]): string {
+  return assumptions.length > 0 ? ` Assumptions: ${assumptions.join("; ")}.` : "";
 }

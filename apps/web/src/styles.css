@@ -123,6 +123,23 @@ input {
   border-color: #49d39b;
 }
 
+.run-status {
+  background: #081422;
+  border: 1px solid #2e4667;
+  border-radius: 12px;
+  color: #a8c2e4;
+  padding: 0.75rem;
+}
+
+.run-status.error {
+  border-color: #ff8a8a;
+  color: #ffd3d3;
+}
+
+.run-status p {
+  margin: 0.35rem 0 0;
+}
+
 form {
   display: flex;
   gap: 0.75rem;
@@ -143,6 +160,32 @@ form {
   gap: 0.5rem;
 }
 
+.approval-preview {
+  background: #081422;
+  border: 1px solid #2e4667;
+  border-radius: 12px;
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+}
+
+.approval-preview summary {
+  color: #d7e7fb;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.approval-preview pre {
+  background: #06111f;
+  border: 1px solid #1f3656;
+  border-radius: 10px;
+  color: #d7e7fb;
+  font: inherit;
+  margin: 0.75rem 0 0;
+  overflow-x: auto;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+}
+
 .memory {
   align-items: center;
   display: flex;
@@ -156,6 +199,26 @@ form {
 .approval p {
   color: #a8c2e4;
   margin: 0.35rem 0 0;
+}
+
+.tool-details {
+  border-top: 1px solid #24344d;
+  display: grid;
+  gap: 0.35rem;
+  grid-template-columns: 90px minmax(0, 1fr);
+  margin: 0.75rem 0 0;
+  padding-top: 0.75rem;
+}
+
+.tool-details dt {
+  color: #8fb0d9;
+  font-weight: 700;
+}
+
+.tool-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 @media (max-width: 900px) {

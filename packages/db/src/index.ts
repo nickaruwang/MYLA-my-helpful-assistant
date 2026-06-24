@@ -1,4 +1,6 @@
 import { MongoClient, type Collection, type Db } from "mongodb";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type {
   Actor,
   ApprovalRequest,
@@ -27,6 +29,8 @@ export interface JarvisDatabase {
 const DEFAULT_MONGODB_URI = "mongodb://localhost:27017";
 const DEFAULT_MONGODB_DATABASE = "jarvis";
 const DEFAULT_QDRANT_COLLECTION = "jarvis_memory";
+
+loadLocalEnv();
 
 export function getMongoUri(): string {
   return process.env.MONGODB_URI ?? DEFAULT_MONGODB_URI;
@@ -379,4 +383,36 @@ function qdrantFetch(url: string, init: RequestInit): Promise<Response> {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function loadLocalEnv(): void {
+  const loadEnvFile = (process as typeof process & { loadEnvFile?: (path?: string) => void }).loadEnvFile;
+  const envPath = findEnvFile();
+  if (!loadEnvFile || !envPath) {
+    return;
+  }
+
+  try {
+    loadEnvFile(envPath);
+  } catch {
+    // Environment variables may already be provided by Docker, CI, or the shell.
+  }
+}
+
+function findEnvFile(): string | undefined {
+  let current = process.cwd();
+  for (let depth = 0; depth < 5; depth += 1) {
+    const candidate = join(current, ".env");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+
+  return undefined;
 }
