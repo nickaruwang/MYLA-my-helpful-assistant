@@ -27,6 +27,7 @@ import {
   ChatRequestSchema,
   MemoryCreateRequestSchema,
   type ApprovalRequest,
+  type ChatMessage,
   type MemoryFact,
   type ToolResult
 } from "@jarvis/shared";
@@ -304,6 +305,8 @@ app.post("/chat", async (c) => {
     payload: { messageId: userMessage.id, actor: userMessage.actor }
   });
 
+  const planningMessages = await listMessages(db, sessionId, 10);
+  const conversationContext = buildPlanningContext(planningMessages, userMessage);
   const toolResults: ToolResult[] = [];
   const approvals: ApprovalRequest[] = [];
   const toolPlanning = await planToolCall({
@@ -312,7 +315,8 @@ app.post("/chat", async (c) => {
     correlationId,
     privacyClass: policy.privacyClass,
     route: policy.modelRoute,
-    preferredModel: parsed.data.preferredModel
+    preferredModel: parsed.data.preferredModel,
+    conversationContext
   });
 
   if (toolPlanning.kind === "clarification") {
@@ -460,6 +464,12 @@ app.post("/chat", async (c) => {
   const directToolResponse = buildDirectToolResponse(toolResults);
   let memories: Awaited<ReturnType<typeof searchMemoryFacts>> = [];
   let assistantText = directToolResponse;
+  let assistantSource = directToolResponse ? "direct-tool-response" : undefined;
+
+  if (!assistantText && toolPlanning.kind === "none") {
+    assistantText = buildNoToolActionResponse(parsed.data.message, conversationContext);
+    assistantSource = assistantText ? "action-guard" : undefined;
+  }
 
   if (!assistantText) {
     const recentMessages = await listMessages(db, sessionId, 12);
@@ -495,7 +505,7 @@ app.post("/chat", async (c) => {
       kind: "model.completed",
       correlationId,
       payload: {
-        model: "direct-tool-response",
+        model: assistantSource ?? "direct-tool-response",
         route: "local",
         toolResultCount: toolResults.length
       }
@@ -595,6 +605,62 @@ app.post("/chat/stream", async (c) => {
     }
   );
 });
+
+function buildPlanningContext(messages: ChatMessage[], currentMessage: ChatMessage) {
+  const currentTime = new Date(currentMessage.createdAt).getTime();
+  const contextWindowMs = 30 * 60 * 1000;
+
+  return messages
+    .filter((message) => message.id !== currentMessage.id)
+    .filter((message) => currentTime - new Date(message.createdAt).getTime() <= contextWindowMs)
+    .slice(-8)
+    .map((message) => ({
+      actor: message.actor,
+      content: message.content,
+      createdAt: message.createdAt
+    }));
+}
+
+function buildNoToolActionResponse(message: string, context: Array<{ actor: string; content: string }>): string | undefined {
+  if (!isLikelyExternalActionRequest(message, context)) {
+    return undefined;
+  }
+
+  const combined = [message, ...context.map((entry) => entry.content)].join("\n");
+  if (/\b(calendar|event|meeting|schedule)\b/i.test(combined)) {
+    return "I have not created the calendar event yet because no verified calendar tool call ran. Please send the event title, date, start/end time, and location together, and I will show an approval before creating it.";
+  }
+
+  return "I have not completed that external action because no verified tool call ran. Please confirm the details, and I will show an approval or notification before taking action.";
+}
+
+function isLikelyExternalActionRequest(message: string, context: Array<{ actor: string; content: string }>): boolean {
+  const combined = [message, ...context.map((entry) => entry.content)].join("\n");
+  const directAction =
+    /\b(add|create|book|schedule|send|delete|remove|pay|transfer|buy|sell|text|message)\b/i.test(message) &&
+    /\b(calendar|event|meeting|gmail|email|draft|tesla|vehicle|bank|payment|transaction)\b/i.test(combined);
+  if (directAction) {
+    return true;
+  }
+
+  const recentClarification = context.some(
+    (entry) =>
+      entry.actor === "assistant" &&
+      /\b(what .* should i use|what date|what end time|clarif|confirm|which)\b/i.test(entry.content)
+  );
+  const priorExternalAction = context.some(
+    (entry) =>
+      entry.actor === "user" &&
+      /\b(add|create|book|schedule|send|delete|remove|pay|transfer|buy|sell|text|message)\b/i.test(entry.content) &&
+      /\b(calendar|event|meeting|gmail|email|draft|tesla|vehicle|bank|payment|transaction)\b/i.test(entry.content)
+  );
+  const currentLooksLikeClarificationAnswer =
+    /\b(today|tomorrow|tmrw|monday|tuesday|wednesday|thursday|friday|saturday|sunday|am|pm|noon|\d{1,2}(?::\d{2})?)\b/i.test(
+      message
+    );
+
+  return recentClarification && priorExternalAction && currentLooksLikeClarificationAnswer;
+}
 
 async function listActivePendingApprovals(): Promise<ApprovalRequest[]> {
   const now = Date.now();

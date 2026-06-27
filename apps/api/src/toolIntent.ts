@@ -103,6 +103,11 @@ function inferEmailBody(message: string): string {
 }
 
 function extractTitle(message: string): string | undefined {
+  const visitMatch = message.match(/\b(?:to\s+)?visit\s+(.+?)\s+from\b/i);
+  if (visitMatch?.[1]) {
+    return `Visit ${visitMatch[1].trim()}`;
+  }
+
   const match =
     message.match(/\b(?:called|titled|named)\s+["']?([^"']+)["']?/i) ??
     message.match(/\bfor\s+["']([^"']+)["']/i) ??
@@ -117,6 +122,11 @@ function inferCalendarCreateArgs(message: string): Record<string, unknown> {
     summary: cleanCalendarSummary(extractTitle(message)),
     timeZone
   };
+  const location = extractLocation(message);
+  if (location) {
+    args.location = location;
+  }
+
   const range = parseDateTimeRange(message);
   if (range) {
     args.startIso = toLocalIsoWithOffset(range.start);
@@ -127,7 +137,8 @@ function inferCalendarCreateArgs(message: string): Record<string, unknown> {
 }
 
 function parseDateTimeRange(message: string): { start: Date; end: Date } | undefined {
-  const match = message.match(/\bfrom\s+(\d{1,2}(?::?\d{2})?)\s*(?:to|-)\s*(\d{1,2}(?::?\d{2})?)\b/i);
+  const clockPattern = String.raw`\d{1,2}(?::?\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?`;
+  const match = message.match(new RegExp(String.raw`\bfrom\s+(${clockPattern})\s*(?:to|-)\s*(${clockPattern})\b`, "i"));
   if (!match?.[1] || !match[2]) {
     return undefined;
   }
@@ -175,26 +186,41 @@ function inferRequestedDate(message: string): Date | undefined {
     return new Date(today.getFullYear(), today.getMonth(), today.getDate());
   }
 
+  const explicitMonthDay = parseExplicitMonthDay(message, today.getFullYear());
+  if (explicitMonthDay) {
+    return explicitMonthDay;
+  }
+
   return undefined;
 }
 
 function parseClock(value: string): { hour: number; minute: number } | undefined {
-  const compact = value.replace(":", "");
+  const normalized = value.toLowerCase().replace(/\./g, "").replace(/\s+/g, "");
+  const meridiem = normalized.match(/(am|pm)$/)?.[1];
+  const digits = normalized.replace(/(am|pm)$/, "");
+  const compact = digits.replace(":", "");
   if (!/^\d{1,4}$/.test(compact)) {
     return undefined;
   }
 
-  if (compact.length <= 2) {
-    return { hour: Number(compact), minute: 0 };
-  }
-
-  const minute = Number(compact.slice(-2));
-  const hour = Number(compact.slice(0, -2));
+  const hour = compact.length <= 2 ? Number(compact) : Number(compact.slice(0, -2));
+  const minute = compact.length <= 2 ? 0 : Number(compact.slice(-2));
   if (hour < 1 || hour > 23 || minute < 0 || minute > 59) {
     return undefined;
   }
 
-  return { hour, minute };
+  if (!meridiem) {
+    return { hour, minute };
+  }
+
+  if (hour > 12) {
+    return undefined;
+  }
+
+  return {
+    hour: meridiem === "pm" ? (hour === 12 ? 12 : hour + 12) : hour === 12 ? 0 : hour,
+    minute
+  };
 }
 
 function toLocalIsoWithOffset(date: Date): string {
@@ -214,6 +240,34 @@ function pad(value: number): string {
 
 function cleanCalendarSummary(value: string | undefined): string | undefined {
   return value?.replace(/\bfrom\s+\d{1,2}(?::?\d{2})?\s*(?:to|-)\s*\d{1,2}(?::?\d{2})?.*$/i, "").trim();
+}
+
+function extractLocation(message: string): string | undefined {
+  const match = message.match(/\bin\s+([a-z][a-z\s.-]+?)\s*$/i);
+  return match?.[1]?.trim();
+}
+
+function parseExplicitMonthDay(message: string, year: number): Date | undefined {
+  const monthPattern =
+    "\\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b";
+  const match = message.match(new RegExp(monthPattern, "i"));
+  if (!match?.[1] || !match[2]) {
+    return undefined;
+  }
+
+  const month = monthIndex(match[1]);
+  const day = Number(match[2]);
+  if (month === undefined || day < 1 || day > 31) {
+    return undefined;
+  }
+
+  return new Date(year, month, day);
+}
+
+function monthIndex(value: string): number | undefined {
+  const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  const index = months.findIndex((month) => value.toLowerCase().startsWith(month));
+  return index === -1 ? undefined : index;
 }
 
 function inferTeslaCommand(message: string): string {

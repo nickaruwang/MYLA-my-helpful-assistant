@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerDefaultTools } from "@jarvis/tools";
 import { parseToolPlannerResponse, selectRelevantToolCards, validatePlannedToolCall } from "./toolPlanner.js";
 
@@ -11,6 +11,21 @@ describe("tool planner", () => {
     );
 
     expect(cards.map((card) => card.name)).toContain("google.gmail.create_draft");
+  });
+
+  it("uses recent conversation context to select calendar tools for clarification answers", () => {
+    const cards = selectRelevantToolCards("tomorrow june 27 saturday from 12pm to 6pm in san mateo", [
+      {
+        actor: "user",
+        content: "add an event to my calendar to visit baby Leo from 12pm to 6pm tmrw"
+      },
+      {
+        actor: "assistant",
+        content: "What date and start time should I use?"
+      }
+    ]);
+
+    expect(cards.map((card) => card.name)).toContain("google.calendar.create_event");
   });
 
   it("validates a dinner email draft plan", () => {
@@ -86,4 +101,38 @@ describe("tool planner", () => {
       expect(result.message).toContain("Who should I address");
     }
   });
+
+  it("rejects calendar plans that contradict server date facts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-26T17:00:00-07:00"));
+
+    const result = validatePlannedToolCall(
+      {
+        toolName: "google.calendar.create_event",
+        args: {
+          calendarId: "primary",
+          summary: "Visit baby Leo",
+          startIso: "2026-06-28T12:00:00-07:00",
+          endIso: "2026-06-28T18:00:00-07:00",
+          timeZone: "America/Los_Angeles"
+        },
+        confidence: 0.9,
+        assumptions: [],
+        missingFields: [],
+        needsClarification: false
+      },
+      {
+        message: "tomorrow june 27 saturday from 12pm to 6pm in san mateo"
+      }
+    );
+
+    expect(result.kind).toBe("clarification");
+    if (result.kind === "clarification") {
+      expect(result.message).toContain("planned tool call used");
+    }
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });

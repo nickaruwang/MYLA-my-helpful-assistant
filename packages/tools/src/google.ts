@@ -104,6 +104,7 @@ export function createSafeGoogleTools(): ToolDefinition[] {
         calendarId: z.string().default("primary"),
         summary: z.string(),
         description: z.string().optional(),
+        location: z.string().optional(),
         startIso: z.string().datetime({ offset: true }),
         endIso: z.string().datetime({ offset: true }),
         timeZone: z.string().default("America/Los_Angeles")
@@ -139,6 +140,7 @@ export function createSafeGoogleTools(): ToolDefinition[] {
           requestBody: {
             summary: asString(args.summary),
             description: asString(args.description),
+            location: asString(args.location),
             start: {
               dateTime: asString(args.startIso),
               timeZone: asString(args.timeZone) ?? "America/Los_Angeles"

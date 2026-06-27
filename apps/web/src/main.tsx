@@ -554,6 +554,7 @@ function approvalPreview(proposal: ToolCallProposal): {
         ["Title", stringValue(args.summary)],
         ["Starts", stringValue(args.startIso)],
         ["Ends", stringValue(args.endIso)],
+        ["Location", stringValue(args.location)],
         ["Time zone", stringValue(args.timeZone)],
         ["Calendar", stringValue(args.calendarId)]
       ]),

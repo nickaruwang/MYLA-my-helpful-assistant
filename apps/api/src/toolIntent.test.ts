@@ -20,4 +20,14 @@ describe("deterministic tool fallback", () => {
     expect(intent?.toolName).toBe("google.calendar.create_event");
     expect(intent?.args.summary).toBe("lunchtime with sam");
   });
+
+  it("parses common AM/PM calendar event wording", () => {
+    const intent = inferToolIntent("add an event to my calendar to visit baby Leo from 12pm to 6pm tmrw in san mateo");
+
+    expect(intent?.toolName).toBe("google.calendar.create_event");
+    expect(intent?.args.summary).toBe("Visit baby Leo");
+    expect(intent?.args.location).toBe("san mateo");
+    expect(String(intent?.args.startIso)).toContain("T12:00:00");
+    expect(String(intent?.args.endIso)).toContain("T18:00:00");
+  });
 });

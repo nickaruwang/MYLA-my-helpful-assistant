@@ -175,6 +175,17 @@ export async function executeRegisteredTool(proposal: ToolCallProposal): Promise
   try {
     const args = tool.argsSchema.parse(proposal.args);
     const data = await tool.execute(args);
+    const blockedMessage = extractBlockedProviderMessage(data);
+    if (blockedMessage) {
+      return {
+        proposalId: proposal.id,
+        toolName: tool.name,
+        status: "blocked",
+        notification: blockedMessage,
+        data
+      };
+    }
+
     const providerMessage = extractProviderMessage(data);
     return {
       proposalId: proposal.id,
@@ -282,6 +293,19 @@ function extractProviderMessage(data: unknown): string | undefined {
 
   const message = (data as { message?: unknown }).message;
   return typeof message === "string" && message.trim() ? message : undefined;
+}
+
+function extractBlockedProviderMessage(data: unknown): string | undefined {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return undefined;
+  }
+
+  const record = data as { kind?: unknown; message?: unknown };
+  if (record.kind !== "scaffold") {
+    return undefined;
+  }
+
+  return typeof record.message === "string" && record.message.trim() ? record.message : "Tool provider is not configured.";
 }
 
 function formatAssumptions(assumptions: string[]): string {
