@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { listPublicTools, proposeAndMaybeExecuteTool, registerDefaultTools } from "./index.js";
+import { listProviderStatuses, listPublicTools, proposeAndMaybeExecuteTool, registerDefaultTools } from "./index.js";
 import { ensureEmailSignature } from "./google.js";
 
 describe("tool gateway", () => {
@@ -12,7 +12,7 @@ describe("tool gateway", () => {
     expect(tools.find((tool) => tool.name === "tesla.vehicle.command")?.approvalMode).toBe("manual");
   });
 
-  it("executes read-only search scaffold automatically when no provider is configured", async () => {
+  it("blocks read-only search scaffold when no provider is configured", async () => {
     registerDefaultTools();
 
     const decision = await proposeAndMaybeExecuteTool({
@@ -24,7 +24,15 @@ describe("tool gateway", () => {
 
     expect(decision.proposal.provider).toBe("search");
     expect(decision.proposal.status).toBe("proposed");
-    expect(decision.result.status).toBe("executed");
+    expect(decision.result.status).toBe("blocked");
+  });
+
+  it("reports provider readiness", () => {
+    registerDefaultTools();
+
+    const providers = listProviderStatuses();
+    expect(providers.map((provider) => provider.provider)).toContain("google");
+    expect(providers.map((provider) => provider.provider)).toContain("search");
   });
 
   it("queues sensitive Tesla reads for manual approval", async () => {

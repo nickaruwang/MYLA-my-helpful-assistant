@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import type { ApprovalRequest, ChatMessage, MemoryFact, Session, ToolCallProposal } from "@jarvis/shared";
+import type { ApprovalRequest, ChatMessage, MemoryFact, Session, ToolCallProposal } from "@myla/shared";
 import { migrate, openDatabase } from "./index.js";
 
-const sqlitePath = process.argv[2] ?? "./data/jarvis.sqlite";
+const sqlitePath = process.argv[2] ?? "./data/myla.sqlite";
 
 if (!existsSync(sqlitePath)) {
   console.error(`SQLite file not found: ${sqlitePath}`);

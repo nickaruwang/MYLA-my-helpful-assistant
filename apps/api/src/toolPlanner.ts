@@ -3,8 +3,8 @@ import {
   getToolDefinition,
   listModelToolCards,
   type ModelToolCard
-} from "@jarvis/tools";
-import type { ModelRoute, PrivacyClass } from "@jarvis/shared";
+} from "@myla/tools";
+import type { ModelRoute, PrivacyClass } from "@myla/shared";
 import { callMlWorker } from "./modelClient.js";
 import { inferToolIntent } from "./toolIntent.js";
 
@@ -27,7 +27,15 @@ const PlannedToolCallSchema = z.object({
 
 export type PlannedToolCall = z.infer<typeof PlannedToolCallSchema>;
 
-export type ToolPlanningResult =
+export interface ToolPlanningTrace {
+  selectedToolNames: string[];
+  rawModelResponse: string | null;
+  plannerResult: string;
+  fallbackReason: string | null;
+  validationErrors: string[];
+}
+
+export type ToolPlanningResult = (
   | {
       kind: "tool";
       plan: PlannedToolCall;
@@ -41,7 +49,8 @@ export type ToolPlanningResult =
   | {
       kind: "none";
       reason: string;
-    };
+    }
+) & { trace?: ToolPlanningTrace };
 
 export async function planToolCall(input: {
   message: string;
@@ -53,8 +62,16 @@ export async function planToolCall(input: {
   conversationContext?: PlannerConversationMessage[];
 }): Promise<ToolPlanningResult> {
   const toolCards = selectRelevantToolCards(input.message, input.conversationContext);
+  const selectedToolNames = toolCards.map((card) => card.name);
   if (toolCards.length === 0) {
-    return fallbackPlanning(input.message);
+    const fallback = fallbackPlanning(input.message);
+    return attachTrace(fallback, {
+      selectedToolNames,
+      rawModelResponse: null,
+      plannerResult: fallback.kind,
+      fallbackReason: fallback.kind === "none" ? fallback.reason : "No relevant tool cards selected.",
+      validationErrors: []
+    });
   }
 
   const modelResponse = await callMlWorker({
@@ -74,20 +91,45 @@ export async function planToolCall(input: {
       conversationContext: input.conversationContext
     });
     if (validated.kind === "tool") {
-      return { ...validated, plannedBy: "model" };
+      return attachTrace({ ...validated, plannedBy: "model" }, {
+        selectedToolNames,
+        rawModelResponse: modelResponse.text,
+        plannerResult: "tool",
+        fallbackReason: null,
+        validationErrors: []
+      });
     }
 
     const fallback = fallbackPlanning(input.message);
     if (fallback.kind === "tool") {
-      return fallback;
+      return attachTrace(fallback, {
+        selectedToolNames,
+        rawModelResponse: modelResponse.text,
+        plannerResult: "tool",
+        fallbackReason: "Model plan did not validate; deterministic fallback produced a tool.",
+        validationErrors: validated.kind === "clarification" ? [validated.message] : []
+      });
     }
 
     if (validated.kind === "clarification") {
-      return validated;
+      return attachTrace(validated, {
+        selectedToolNames,
+        rawModelResponse: modelResponse.text,
+        plannerResult: "clarification",
+        fallbackReason: fallback.kind === "none" ? fallback.reason : null,
+        validationErrors: [validated.message]
+      });
     }
   }
 
-  return fallbackPlanning(input.message);
+  const fallback = fallbackPlanning(input.message);
+  return attachTrace(fallback, {
+    selectedToolNames,
+    rawModelResponse: modelResponse.text,
+    plannerResult: fallback.kind,
+    fallbackReason: planned ? "Parsed model plan did not produce a valid result." : "Model response did not contain parseable tool JSON.",
+    validationErrors: []
+  });
 }
 
 export function selectRelevantToolCards(message: string, conversationContext: PlannerConversationMessage[] = []): ModelToolCard[] {
@@ -96,17 +138,53 @@ export function selectRelevantToolCards(message: string, conversationContext: Pl
   const selected = cards.filter((card) => {
     const haystack = [card.name, card.provider, card.operation, card.description].join(" ").toLowerCase();
     return (
-      (/\b(calendar|event|meeting|schedule|book|lunch|dinner|time|tmrw|tomorrow)\b/.test(lower) &&
+      (/\b(calendar|event|meeting|schedule|book|reschedule|update|delete|cancel|lunch|dinner|time|tmrw|tomorrow)\b/.test(lower) &&
         haystack.includes("calendar")) ||
-      (/\b(email|gmail|draft|send|write)\b/.test(lower) && haystack.includes("gmail")) ||
-      (/\b(drive|file|doc)\b/.test(lower) && haystack.includes("drive")) ||
+      (/\b(email|gmail|draft|send|write|inbox|thread|message)\b/.test(lower) && haystack.includes("gmail")) ||
+      (/\b(drive|file|doc|document|summarize|read)\b/.test(lower) && haystack.includes("drive")) ||
       (/\b(search|web|internet|latest|look up)\b/.test(lower) && haystack.includes("search")) ||
       (/\b(tesla|car|vehicle)\b/.test(lower) && haystack.includes("tesla")) ||
       (/\b(bank|finance|spending|transaction|portfolio|robinhood)\b/.test(lower) && haystack.includes("plaid"))
     );
   });
 
-  return selected.length > 0 ? selected.slice(0, 5) : cards.slice(0, 5);
+  return selected.length > 0
+    ? selected.sort((left, right) => relevanceScore(right, lower) - relevanceScore(left, lower)).slice(0, 5)
+    : cards.slice(0, 5);
+}
+
+function relevanceScore(card: ModelToolCard, lower: string): number {
+  let score = 0;
+  if (lower.includes(card.provider)) {
+    score += 10;
+  }
+  for (const part of card.name.split(".")) {
+    if (lower.includes(part.replace(/_/g, " "))) {
+      score += 4;
+    }
+  }
+  if (lower.includes("gmail") && card.name.includes("gmail")) {
+    score += 8;
+  }
+  if (lower.includes("drive") && card.name.includes("drive")) {
+    score += 8;
+  }
+  if (lower.includes("calendar") && card.name.includes("calendar")) {
+    score += 8;
+  }
+  if (/\b(update|reschedule)\b/.test(lower) && card.name.includes("update")) {
+    score += 6;
+  }
+  if (/\b(delete|cancel)\b/.test(lower) && card.name.includes("delete")) {
+    score += 6;
+  }
+  if (/\b(read|summarize)\b/.test(lower) && card.name.includes("read")) {
+    score += 6;
+  }
+  if (/\b(search|find)\b/.test(lower) && card.name.includes("search")) {
+    score += 6;
+  }
+  return score;
 }
 
 export function parseToolPlannerResponse(text: string): PlannedToolCall | undefined {
@@ -179,6 +257,10 @@ function fallbackPlanning(message: string): ToolPlanningResult {
   });
 
   return validated.kind === "tool" ? { ...validated, plannedBy: "fallback" } : validated;
+}
+
+function attachTrace<T extends ToolPlanningResult>(result: T, trace: ToolPlanningTrace): T {
+  return { ...result, trace };
 }
 
 function buildPlannerPrompt(

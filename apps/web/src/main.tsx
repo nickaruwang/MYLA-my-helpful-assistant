@@ -5,14 +5,16 @@ import type {
   ChatMessage,
   ChatResponse,
   MemoryFact,
+  ProviderStatus,
   Session,
   ToolCallProposal,
+  ToolTask,
   ToolResult
-} from "@jarvis/shared";
+} from "@myla/shared";
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
-const SESSION_STORAGE_KEY = "jarvis-session-id";
+const SESSION_STORAGE_KEY = "myla-session-id";
 
 interface PublicTool {
   name: string;
@@ -44,10 +46,12 @@ function App() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [toolResults, setToolResults] = useState<ToolResult[]>([]);
+  const [tasks, setTasks] = useState<ToolTask[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [memories, setMemories] = useState<MemoryFact[]>([]);
   const [memoryInput, setMemoryInput] = useState("");
   const [tools, setTools] = useState<PublicTool[]>([]);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>({ mode: "disabled", ready: false, notes: [] });
   const [auditStatus, setAuditStatus] = useState<string>("not checked");
   const [runStatus, setRunStatus] = useState<string>("idle");
@@ -58,8 +62,10 @@ function App() {
   useEffect(() => {
     void refreshSessions();
     void refreshApprovals();
+    void refreshTasks();
     void refreshMemory();
     void refreshTools();
+    void refreshProviders();
     void refreshVoiceStatus();
     void verifyAudit();
   }, []);
@@ -71,6 +77,7 @@ function App() {
 
     localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
     void loadMessages(sessionId);
+    void refreshTasks(sessionId);
   }, [sessionId]);
 
   async function sendMessage(event: React.FormEvent) {
@@ -119,7 +126,9 @@ function App() {
         payload.message
       ]);
       setToolResults((current) => [...payload.toolResults, ...current]);
+      setTasks((current) => dedupeTasks([...payload.tasks, ...current]));
       setApprovals((current) => dedupeApprovals([...payload.approvals, ...current]));
+      setProviders(payload.providerStatuses);
       setMemories((current) => dedupeMemories([...payload.storedMemories, ...current]));
       setRunStatus(
         `Completed in ${elapsedSeconds}s. Tools: ${payload.toolResults.length}. Approvals: ${payload.approvals.length}.`
@@ -127,7 +136,7 @@ function App() {
       speak(payload.message.content);
       void (async () => {
         try {
-          await Promise.all([verifyAudit(), refreshSessions(), refreshMemory()]);
+          await Promise.all([verifyAudit(), refreshSessions(), refreshMemory(), refreshTasks(payload.sessionId), refreshProviders()]);
         } catch (error) {
           console.warn("Post-response refresh failed", error);
         }
@@ -218,6 +227,7 @@ function App() {
       }
       setRunStatus(decision === "approved" ? "Approval executed." : "Approval rejected.");
       await refreshApprovals();
+      await refreshTasks();
       await verifyAudit();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Approval failed.";
@@ -233,6 +243,13 @@ function App() {
     const response = await fetch(`${API_URL}/memory`);
     const payload = (await response.json()) as { facts: MemoryFact[] };
     setMemories(payload.facts);
+  }
+
+  async function refreshTasks(nextSessionId = sessionId) {
+    const url = nextSessionId ? `${API_URL}/sessions/${nextSessionId}/tasks` : `${API_URL}/tasks`;
+    const response = await fetch(url);
+    const payload = (await response.json()) as { tasks: ToolTask[] };
+    setTasks(payload.tasks);
   }
 
   async function saveMemory(event: React.FormEvent) {
@@ -259,6 +276,12 @@ function App() {
     const response = await fetch(`${API_URL}/tools`);
     const payload = (await response.json()) as { tools: PublicTool[] };
     setTools(payload.tools);
+  }
+
+  async function refreshProviders() {
+    const response = await fetch(`${API_URL}/providers`);
+    const payload = (await response.json()) as { providers: ProviderStatus[] };
+    setProviders(payload.providers);
   }
 
   async function refreshVoiceStatus() {
@@ -299,23 +322,51 @@ function App() {
     setLastError(undefined);
     setRunStatus("idle");
     setToolResults([]);
+    setTasks([]);
   }
 
   return (
     <main className="shell">
-      <section className="panel hero">
-        <p className="eyebrow">Local-first assistant</p>
-        <h1>JARVIS Second Brain</h1>
-        <p>
-          Chat and voice requests route through Ollama, MongoDB memory, policy checks, tool approvals, and a hash-chained audit log.
-        </p>
+      <section className="hero">
+        <div className="hero-copy">
+          <p className="eyebrow">MYLA / local-first copilot</p>
+          <h1>Meet MYLA, your calm command center.</h1>
+          <p>
+            A thoughtful personal assistant for chat, voice, memory, approvals, and tools, with every action routed through
+            policy checks and a verifiable audit trail.
+          </p>
+          <div className="prompt-row" aria-label="Starter prompts">
+            <button type="button" className="prompt-chip" onClick={() => setInput("What should I focus on this morning?")}>
+              Plan my morning
+            </button>
+            <button type="button" className="prompt-chip" onClick={() => setInput("Remember that I prefer morning meetings.")}>
+              Remember a preference
+            </button>
+            <button type="button" className="prompt-chip" onClick={() => setInput("Check my calendar and flag anything important.")}>
+              Scan my day
+            </button>
+          </div>
+        </div>
+        <aside className="persona-card" aria-label="MYLA personality">
+          <div className="assistant-orb">MYLA</div>
+          <p className="eyebrow">Assistant style</p>
+          <h2>Warm, precise, and quietly proactive.</h2>
+          <p className="muted">
+            MYLA keeps the room uncluttered: she asks before acting, remembers what matters, and surfaces the next useful step.
+          </p>
+        </aside>
       </section>
 
-      <section className="grid">
-        <aside className="stack">
+      <section className="workspace-grid">
+        <aside className="stack side-rail">
           <section className="panel">
-            <h2>Sessions</h2>
-            <button type="button" onClick={newSession}>New session</button>
+            <div className="panel-heading">
+              <span>
+                <p className="eyebrow">Threads</p>
+                <h2>Sessions</h2>
+              </span>
+              <button type="button" className="secondary compact-button" onClick={newSession}>New</button>
+            </div>
             <div className="list">
               {sessions.map((session) => (
                 <button
@@ -331,44 +382,62 @@ function App() {
           </section>
 
           <section className="panel">
+            <p className="eyebrow">Hands free</p>
             <h2>Voice</h2>
             <p className="muted">Worker mode: {voiceStatus.mode} ({voiceStatus.ready ? "ready" : "not ready"})</p>
             <button type="button" onClick={startVoiceInput} disabled={busy || listening}>
-              {listening ? "Listening..." : "Push to talk"}
+              {listening ? "MYLA is listening..." : "Push to talk"}
             </button>
             {voiceStatus.notes.slice(0, 2).map((note) => <p key={note} className="muted">{note}</p>)}
           </section>
         </aside>
 
         <div className="panel chat">
-          <h2>Chat</h2>
-          <div className="messages">
+          <div className="chat-heading">
+            <span>
+              <p className="eyebrow">Conversation</p>
+              <h2>Ask MYLA anything</h2>
+            </span>
             <div className={lastError ? "run-status error" : "run-status"}>
               <strong>Status:</strong> {runStatus}
               {lastError ? <p>{lastError}</p> : null}
             </div>
+          </div>
+          <div className="messages">
             {messages.length === 0 ? (
-              <p className="muted">Try: "check my calendar", "search the latest AI news", or "remember that I prefer morning meetings".</p>
+              <div className="empty-state">
+                <p className="eyebrow">A clear place to start</p>
+                <h3>Tell MYLA what you want handled.</h3>
+                <p className="muted">
+                  Try a calendar check, a quick search, or a memory you want MYLA to keep close for next time.
+                </p>
+              </div>
             ) : (
               messages.map((message) => (
                 <article key={message.id} className={`message ${message.actor}`}>
-                  <strong>{message.actor}</strong>
+                  <strong>{actorLabel(message.actor)}</strong>
                   <p>{message.content}</p>
                 </article>
               ))
             )}
           </div>
           <form onSubmit={sendMessage}>
-            <input value={input} onChange={(event) => setInput(event.target.value)} disabled={busy} />
+            <input
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              disabled={busy}
+              placeholder="Ask MYLA to plan, remember, search, or take an approved action..."
+            />
             <button disabled={busy}>{busy ? "Thinking..." : "Send"}</button>
           </form>
         </div>
 
-        <aside className="stack">
+        <aside className="stack context-rail">
           <section className="panel">
+            <p className="eyebrow">Human in the loop</p>
             <h2>Approvals</h2>
             {approvals.length === 0 ? (
-              <p className="muted">No pending approvals.</p>
+              <p className="muted">Nothing needs your sign-off right now.</p>
             ) : (
               approvals.map((approval) => (
                 <div key={approval.id} className="approval">
@@ -398,39 +467,62 @@ function App() {
           </section>
 
           <section className="panel">
-            <h2>Notifications</h2>
-            {toolResults.length === 0 ? (
-              <p className="muted">Tool notifications will appear here.</p>
+            <p className="eyebrow">What MYLA is doing</p>
+            <h2>Activity</h2>
+            {tasks.length === 0 ? (
+              <p className="muted">Tool activity will appear here when MYLA takes action.</p>
             ) : (
-              toolResults.map((result) => (
-                <div key={`${result.proposalId}-${result.status}`} className="notice">
-                  <strong>{result.toolName}</strong>
-                  <p>{result.notification}</p>
-                  {toolResultDetails(result).length > 0 ? (
-                    <dl className="tool-details">
-                      {toolResultDetails(result).map(([label, value]) => (
-                        <React.Fragment key={label}>
-                          <dt>{label}</dt>
-                          <dd>{value}</dd>
-                        </React.Fragment>
-                      ))}
-                    </dl>
-                  ) : null}
-                </div>
-              ))
+              tasks.slice(0, 8).map((task) => <TaskCard key={task.id} task={task} />)
+            )}
+            {toolResults.length > 0 ? (
+              <details className="approval-preview">
+                <summary>Recent Tool Notifications</summary>
+                {toolResults.slice(0, 5).map((result) => (
+                  <div key={`${result.proposalId}-${result.status}`} className="notice">
+                    <strong>{result.toolName}</strong>
+                    <p>{result.notification}</p>
+                    {toolResultDetails(result).length > 0 ? (
+                      <dl className="tool-details">
+                        {toolResultDetails(result).map(([label, value]) => (
+                          <React.Fragment key={label}>
+                            <dt>{label}</dt>
+                            <dd>{value}</dd>
+                          </React.Fragment>
+                        ))}
+                      </dl>
+                    ) : null}
+                  </div>
+                ))}
+              </details>
+            ) : null}
+          </section>
+
+          <section className="panel">
+            <p className="eyebrow">Connections</p>
+            <h2>Providers</h2>
+            {providers.length === 0 ? (
+              <p className="muted">Provider readiness is unavailable.</p>
+            ) : (
+              <div className="list">
+                {providers.map((provider) => (
+                  <ProviderCard key={provider.provider} provider={provider} />
+                ))}
+              </div>
             )}
           </section>
 
           <section className="panel">
+            <p className="eyebrow">Personal context</p>
             <h2>Memory</h2>
             <form onSubmit={saveMemory} className="compact-form">
-              <input value={memoryInput} onChange={(event) => setMemoryInput(event.target.value)} placeholder="Add a memory" />
+              <input value={memoryInput} onChange={(event) => setMemoryInput(event.target.value)} placeholder="Give MYLA something to remember" />
               <button>Save</button>
             </form>
             <div className="list">
               {memories.slice(0, 6).map((memory) => (
                 <div key={memory.id} className="memory">
                   <span>{memory.object}</span>
+                  <small>{[memory.category, memory.sensitivity].filter(Boolean).join(" / ") || "general"}</small>
                   <button type="button" className="secondary" onClick={() => void deleteMemory(memory.id)}>Forget</button>
                 </div>
               ))}
@@ -438,6 +530,7 @@ function App() {
           </section>
 
           <section className="panel">
+            <p className="eyebrow">Capabilities</p>
             <h2>Tools</h2>
             <div className="list">
               {tools.map((tool) => (
@@ -450,6 +543,7 @@ function App() {
           </section>
 
           <section className="panel">
+            <p className="eyebrow">Trust layer</p>
             <h2>Audit</h2>
             <p>{auditStatus}</p>
             <button type="button" onClick={verifyAudit}>
@@ -484,8 +578,56 @@ function dedupeApprovals(approvals: ApprovalRequest[]): ApprovalRequest[] {
   return [...new Map(approvals.map((approval) => [approval.id, approval])).values()];
 }
 
+function dedupeTasks(tasks: ToolTask[]): ToolTask[] {
+  return [...new Map(tasks.map((task) => [task.id, task])).values()].sort(
+    (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+  );
+}
+
 function dedupeMemories(memories: MemoryFact[]): MemoryFact[] {
   return [...new Map(memories.map((memory) => [memory.id, memory])).values()];
+}
+
+function TaskCard({ task }: { task: ToolTask }) {
+  return (
+    <div className="notice">
+      <strong>{task.toolName ?? "External action"} · {humanizeKey(task.status)}</strong>
+      {task.resultNotification ? <p>{task.resultNotification}</p> : null}
+      {task.missingFields.length > 0 ? <p className="muted">Missing: {task.missingFields.join(", ")}</p> : null}
+      {task.assumptions.length > 0 ? <p className="muted">Assumptions: {task.assumptions.join("; ")}</p> : null}
+      <details className="approval-preview">
+        <summary>Task Details</summary>
+        <dl className="tool-details">
+          <dt>Correlation</dt>
+          <dd>{task.correlationId}</dd>
+          {task.proposalId ? (
+            <>
+              <dt>Proposal</dt>
+              <dd>{task.proposalId}</dd>
+            </>
+          ) : null}
+          {task.approvalId ? (
+            <>
+              <dt>Approval</dt>
+              <dd>{task.approvalId}</dd>
+            </>
+          ) : null}
+        </dl>
+        {Object.keys(task.draftArgs).length > 0 ? <pre>{JSON.stringify(task.draftArgs, null, 2)}</pre> : null}
+      </details>
+    </div>
+  );
+}
+
+function ProviderCard({ provider }: { provider: ProviderStatus }) {
+  return (
+    <div className={`tool provider ${provider.status}`}>
+      <strong>{provider.provider} · {humanizeKey(provider.status)}</strong>
+      <p>{provider.message}</p>
+      {provider.missingConfig.length > 0 ? <p className="muted">Missing: {provider.missingConfig.join(", ")}</p> : null}
+      <small>{provider.tools.length} tools</small>
+    </div>
+  );
 }
 
 function approvalResultMessage(decision: "approved" | "rejected", result: ToolResult): string {
@@ -601,6 +743,16 @@ function toolResultDetails(result: ToolResult): Array<[string, string]> {
   }
 
   return details;
+}
+
+function actorLabel(actor: ChatMessage["actor"]): string {
+  if (actor === "assistant") {
+    return "MYLA";
+  }
+  if (actor === "user") {
+    return "You";
+  }
+  return humanizeKey(actor);
 }
 
 function humanizeKey(value: string): string {

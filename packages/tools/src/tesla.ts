@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ToolDefinition } from "./index.js";
+import type { ProviderStatus } from "@myla/shared";
 
 const VehicleStatusArgsSchema = z.object({
   vehicleId: z.string().optional()
@@ -22,6 +23,7 @@ export function createTeslaTools(): ToolDefinition[] {
       riskLevel: "sensitive",
       approvalMode: "manual",
       argsSchema: VehicleStatusArgsSchema,
+      getProviderStatus: getTeslaProviderStatus,
       dryRun: (args) => `Read Tesla vehicle status for ${args.vehicleId ?? "configured vehicle"}.`,
       execute: async (args) => teslaGet(`/api/1/vehicles/${vehicleId(args.vehicleId)}/vehicle_data`)
     },
@@ -34,6 +36,7 @@ export function createTeslaTools(): ToolDefinition[] {
       riskLevel: "high",
       approvalMode: "manual",
       argsSchema: VehicleCommandArgsSchema,
+      getProviderStatus: getTeslaProviderStatus,
       dryRun: (args) => `Would run Tesla command "${args.command}" on ${args.vehicleId ?? "configured vehicle"}.`,
       execute: async (args) => {
         if (process.env.TESLA_COMMANDS_ENABLED !== "true") {
@@ -51,6 +54,28 @@ export function createTeslaTools(): ToolDefinition[] {
       }
     }
   ];
+}
+
+function getTeslaProviderStatus(): ProviderStatus {
+  const missingConfig = [
+    !process.env.TESLA_ACCESS_TOKEN ? "TESLA_ACCESS_TOKEN" : undefined,
+    !process.env.TESLA_VEHICLE_ID ? "TESLA_VEHICLE_ID" : undefined
+  ].filter((value): value is string => Boolean(value));
+  const commandsDisabled = process.env.TESLA_COMMANDS_ENABLED !== "true";
+
+  return {
+    provider: "tesla",
+    status: missingConfig.length > 0 ? "needs_setup" : commandsDisabled ? "disabled" : "ready",
+    message:
+      missingConfig.length > 0
+        ? `Tesla Fleet API config is missing: ${missingConfig.join(", ")}.`
+        : commandsDisabled
+          ? "Tesla status reads are configured, but commands are disabled."
+          : "Tesla Fleet API is configured and commands are enabled.",
+    requiredScopes: ["TESLA_ACCESS_TOKEN", "TESLA_VEHICLE_ID", "TESLA_COMMANDS_ENABLED"],
+    missingConfig: commandsDisabled ? [...missingConfig, "TESLA_COMMANDS_ENABLED"] : missingConfig,
+    tools: []
+  };
 }
 
 async function teslaGet(path: string): Promise<unknown> {

@@ -1,4 +1,4 @@
-import type { ApprovalMode, ApprovalRequest, RiskLevel, ToolCallProposal, ToolResult } from "@jarvis/shared";
+import type { ApprovalMode, ApprovalRequest, ProviderStatus, RiskLevel, ToolCallProposal, ToolResult } from "@myla/shared";
 import { z } from "zod";
 import { createSafeGoogleTools } from "./google.js";
 import { createFinanceTools } from "./finance.js";
@@ -22,6 +22,9 @@ export interface ToolDefinition {
     assumptions?: string[];
   }>;
   clarificationPrompts?: Record<string, string>;
+  getProviderStatus?: () => ProviderStatus;
+  validate?: (args: Record<string, unknown>) => string[];
+  verify?: (args: Record<string, unknown>, data: unknown) => Promise<unknown>;
   execute: (args: Record<string, unknown>) => Promise<unknown>;
   dryRun: (args: Record<string, unknown>) => string;
 }
@@ -77,6 +80,25 @@ export function listPublicTools(): PublicToolDefinition[] {
   }));
 }
 
+export function listProviderStatuses(): ProviderStatus[] {
+  const byProvider = new Map<string, ProviderStatus>();
+  for (const tool of listTools()) {
+    const status = tool.getProviderStatus?.() ?? defaultProviderStatus(tool);
+    const existing = byProvider.get(status.provider);
+    if (!existing) {
+      byProvider.set(status.provider, { ...status, tools: [tool.name] });
+      continue;
+    }
+
+    byProvider.set(status.provider, {
+      ...mergeProviderStatus(existing, status),
+      tools: [...new Set([...existing.tools, tool.name])]
+    });
+  }
+
+  return [...byProvider.values()].sort((left, right) => left.provider.localeCompare(right.provider));
+}
+
 export function listModelToolCards(): ModelToolCard[] {
   return listTools().map((tool) => ({
     name: tool.name,
@@ -111,6 +133,11 @@ export async function proposeAndMaybeExecuteTool(input: {
   }
 
   const args = tool.argsSchema.parse(input.args);
+  const validationErrors = tool.validate?.(args) ?? [];
+  if (validationErrors.length > 0) {
+    throw new Error(validationErrors.join(" "));
+  }
+
   const proposal: ToolCallProposal = {
     id: crypto.randomUUID(),
     sessionId: input.sessionId,
@@ -174,6 +201,16 @@ export async function executeRegisteredTool(proposal: ToolCallProposal): Promise
 
   try {
     const args = tool.argsSchema.parse(proposal.args);
+    const validationErrors = tool.validate?.(args) ?? [];
+    if (validationErrors.length > 0) {
+      return {
+        proposalId: proposal.id,
+        toolName: proposal.toolName,
+        status: "failed",
+        notification: validationErrors.join(" ")
+      };
+    }
+
     const data = await tool.execute(args);
     const blockedMessage = extractBlockedProviderMessage(data);
     if (blockedMessage) {
@@ -186,6 +223,7 @@ export async function executeRegisteredTool(proposal: ToolCallProposal): Promise
       };
     }
 
+    const verifiedData = tool.verify ? await tool.verify(args, data) : data;
     const providerMessage = extractProviderMessage(data);
     return {
       proposalId: proposal.id,
@@ -196,7 +234,7 @@ export async function executeRegisteredTool(proposal: ToolCallProposal): Promise
         (proposal.approvalMode === "notify"
           ? `Executed with notification: ${proposal.dryRunSummary}`
           : `Executed: ${proposal.dryRunSummary}`),
-      data
+      data: verifiedData
     };
   } catch (error) {
     return {
@@ -301,7 +339,7 @@ function extractBlockedProviderMessage(data: unknown): string | undefined {
   }
 
   const record = data as { kind?: unknown; message?: unknown };
-  if (record.kind !== "scaffold") {
+  if (record.kind !== "scaffold" && record.kind !== "blocked") {
     return undefined;
   }
 
@@ -310,4 +348,47 @@ function extractBlockedProviderMessage(data: unknown): string | undefined {
 
 function formatAssumptions(assumptions: string[]): string {
   return assumptions.length > 0 ? ` Assumptions: ${assumptions.join("; ")}.` : "";
+}
+
+function defaultProviderStatus(tool: ToolDefinition): ProviderStatus {
+  const missingConfig = missingConfigForScopes(tool.requiredScopes);
+  return {
+    provider: tool.provider,
+    status: missingConfig.length > 0 ? "needs_setup" : "ready",
+    message:
+      missingConfig.length > 0
+        ? `Missing configuration for ${tool.provider}: ${missingConfig.join(", ")}.`
+        : `${tool.provider} appears configured.`,
+    requiredScopes: tool.requiredScopes,
+    missingConfig,
+    tools: [tool.name]
+  };
+}
+
+function mergeProviderStatus(left: ProviderStatus, right: ProviderStatus): ProviderStatus {
+  const rank: Record<ProviderStatus["status"], number> = {
+    ready: 0,
+    degraded: 1,
+    disabled: 2,
+    needs_setup: 3
+  };
+  const worse = rank[right.status] > rank[left.status] ? right : left;
+  return {
+    provider: left.provider,
+    status: worse.status,
+    message: worse.message,
+    requiredScopes: [...new Set([...left.requiredScopes, ...right.requiredScopes])],
+    missingConfig: [...new Set([...left.missingConfig, ...right.missingConfig])],
+    tools: [...new Set([...left.tools, ...right.tools])]
+  };
+}
+
+function missingConfigForScopes(scopes: string[]): string[] {
+  const envNames = scopes.flatMap((scope) =>
+    scope
+      .split(/\s+or\s+/i)
+      .map((part) => part.trim())
+      .filter((part) => /^[A-Z0-9_]+$/.test(part))
+  );
+  return envNames.filter((envName) => !process.env[envName]);
 }

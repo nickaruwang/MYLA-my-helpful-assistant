@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ToolDefinition } from "./index.js";
+import type { ProviderStatus } from "@myla/shared";
 
 const SearchArgsSchema = z.object({
   query: z.string().min(1),
@@ -17,10 +18,25 @@ export function createSearchTools(): ToolDefinition[] {
       riskLevel: "read",
       approvalMode: "auto",
       argsSchema: SearchArgsSchema,
+      getProviderStatus: getSearchProviderStatus,
       dryRun: (args) => `Search the web for "${args.query}".`,
       execute: async (args) => runSearch(SearchArgsSchema.parse(args))
     }
   ];
+}
+
+function getSearchProviderStatus(): ProviderStatus {
+  const configured = Boolean(process.env.BRAVE_SEARCH_API_KEY || process.env.TAVILY_API_KEY || process.env.SEARXNG_URL);
+  return {
+    provider: "search",
+    status: configured ? "ready" : "needs_setup",
+    message: configured
+      ? "Search provider is configured."
+      : "Configure BRAVE_SEARCH_API_KEY, TAVILY_API_KEY, or SEARXNG_URL to enable web search.",
+    requiredScopes: ["BRAVE_SEARCH_API_KEY or TAVILY_API_KEY or SEARXNG_URL"],
+    missingConfig: configured ? [] : ["BRAVE_SEARCH_API_KEY or TAVILY_API_KEY or SEARXNG_URL"],
+    tools: []
+  };
 }
 
 async function runSearch(args: z.infer<typeof SearchArgsSchema>): Promise<unknown> {

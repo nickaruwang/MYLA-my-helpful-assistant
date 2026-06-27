@@ -8,27 +8,32 @@ import type {
   MemoryFact,
   MemoryRelationship,
   MemorySearchResult,
+  PlannerTrace,
   Session,
   ToolCallProposal,
+  ToolTask,
+  ToolTaskStatus,
   ToolProposalStatus
-} from "@jarvis/shared";
+} from "@myla/shared";
 
-export interface JarvisDatabase {
+export interface MylaDatabase {
   client: MongoClient;
   db: Db;
   sessions: Collection<Session>;
   messages: Collection<ChatMessage>;
   toolProposals: Collection<ToolCallProposal>;
+  toolTasks: Collection<ToolTask>;
   approvals: Collection<ApprovalRequest>;
   memoryFacts: Collection<MemoryFact>;
   memoryRelationships: Collection<MemoryRelationship>;
+  plannerTraces: Collection<PlannerTrace>;
   auditEvents: Collection<Record<string, unknown>>;
   close: () => Promise<void>;
 }
 
 const DEFAULT_MONGODB_URI = "mongodb://localhost:27017";
-const DEFAULT_MONGODB_DATABASE = "jarvis";
-const DEFAULT_QDRANT_COLLECTION = "jarvis_memory";
+const DEFAULT_MONGODB_DATABASE = "myla";
+const DEFAULT_QDRANT_COLLECTION = "myla_memory";
 
 loadLocalEnv();
 
@@ -40,7 +45,7 @@ export function getMongoDatabaseName(): string {
   return process.env.MONGODB_DATABASE ?? DEFAULT_MONGODB_DATABASE;
 }
 
-export async function openDatabase(uri = getMongoUri(), databaseName = getMongoDatabaseName()): Promise<JarvisDatabase> {
+export async function openDatabase(uri = getMongoUri(), databaseName = getMongoDatabaseName()): Promise<MylaDatabase> {
   const client = new MongoClient(uri);
   await client.connect();
   const db = client.db(databaseName);
@@ -51,27 +56,34 @@ export async function openDatabase(uri = getMongoUri(), databaseName = getMongoD
     sessions: db.collection<Session>("sessions"),
     messages: db.collection<ChatMessage>("messages"),
     toolProposals: db.collection<ToolCallProposal>("tool_proposals"),
+    toolTasks: db.collection<ToolTask>("tool_tasks"),
     approvals: db.collection<ApprovalRequest>("approvals"),
     memoryFacts: db.collection<MemoryFact>("memory_facts"),
     memoryRelationships: db.collection<MemoryRelationship>("memory_relationships"),
+    plannerTraces: db.collection<PlannerTrace>("planner_traces"),
     auditEvents: db.collection<Record<string, unknown>>("audit_events"),
     close: () => client.close()
   };
 }
 
-export async function migrate(db: JarvisDatabase): Promise<void> {
+export async function migrate(db: MylaDatabase): Promise<void> {
   await Promise.all([
     db.sessions.createIndex({ id: 1 }, { unique: true }),
     db.sessions.createIndex({ updatedAt: -1 }),
     db.messages.createIndex({ sessionId: 1, createdAt: -1 }),
     db.toolProposals.createIndex({ id: 1 }, { unique: true }),
     db.toolProposals.createIndex({ sessionId: 1, createdAt: -1 }),
+    db.toolTasks.createIndex({ id: 1 }, { unique: true }),
+    db.toolTasks.createIndex({ sessionId: 1, updatedAt: -1 }),
+    db.toolTasks.createIndex({ status: 1, expiresAt: 1 }),
     db.approvals.createIndex({ id: 1 }, { unique: true }),
     db.approvals.createIndex({ status: 1, expiresAt: 1 }),
     db.memoryFacts.createIndex({ id: 1 }, { unique: true }),
     db.memoryFacts.createIndex({ subject: 1, updatedAt: -1 }),
     db.memoryFacts.createIndex({ object: "text", subject: "text", predicate: "text" }),
     db.memoryRelationships.createIndex({ fromEntity: 1 }),
+    db.plannerTraces.createIndex({ correlationId: 1 }),
+    db.plannerTraces.createIndex({ sessionId: 1, createdAt: -1 }),
     db.auditEvents.createIndex({ seq: 1 }, { unique: true }),
     db.auditEvents.createIndex({ id: 1 }, { unique: true })
   ]);
@@ -81,7 +93,7 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
-export async function createSession(db: JarvisDatabase, title?: string): Promise<string> {
+export async function createSession(db: MylaDatabase, title?: string): Promise<string> {
   const id = crypto.randomUUID();
   const now = nowIso();
   await db.sessions.insertOne({
@@ -93,7 +105,7 @@ export async function createSession(db: JarvisDatabase, title?: string): Promise
   return id;
 }
 
-export async function ensureSession(db: JarvisDatabase, sessionId?: string): Promise<string> {
+export async function ensureSession(db: MylaDatabase, sessionId?: string): Promise<string> {
   if (!sessionId) {
     return createSession(db);
   }
@@ -113,12 +125,12 @@ export async function ensureSession(db: JarvisDatabase, sessionId?: string): Pro
   return sessionId;
 }
 
-export async function listSessions(db: JarvisDatabase, limit = 25): Promise<Session[]> {
+export async function listSessions(db: MylaDatabase, limit = 25): Promise<Session[]> {
   return db.sessions.find({}, { projection: { _id: 0 } }).sort({ updatedAt: -1 }).limit(limit).toArray();
 }
 
 export async function storeMessage(
-  db: JarvisDatabase,
+  db: MylaDatabase,
   input: {
     sessionId: string;
     actor: Actor;
@@ -141,7 +153,7 @@ export async function storeMessage(
   return message;
 }
 
-export async function listMessages(db: JarvisDatabase, sessionId: string, limit = 50): Promise<ChatMessage[]> {
+export async function listMessages(db: MylaDatabase, sessionId: string, limit = 50): Promise<ChatMessage[]> {
   const rows = await db.messages
     .find({ sessionId }, { projection: { _id: 0 } })
     .sort({ createdAt: -1 })
@@ -158,16 +170,16 @@ export async function listMessages(db: JarvisDatabase, sessionId: string, limit 
   }));
 }
 
-export async function storeToolProposal(db: JarvisDatabase, proposal: ToolCallProposal): Promise<void> {
+export async function storeToolProposal(db: MylaDatabase, proposal: ToolCallProposal): Promise<void> {
   await db.toolProposals.insertOne(proposal);
 }
 
-export async function getToolProposal(db: JarvisDatabase, proposalId: string): Promise<ToolCallProposal | null> {
+export async function getToolProposal(db: MylaDatabase, proposalId: string): Promise<ToolCallProposal | null> {
   return db.toolProposals.findOne({ id: proposalId }, { projection: { _id: 0 } });
 }
 
 export async function updateToolProposalStatus(
-  db: JarvisDatabase,
+  db: MylaDatabase,
   proposalId: string,
   status: ToolProposalStatus,
   updates: Partial<Pick<ToolCallProposal, "decidedAt" | "executedAt">> = {}
@@ -175,16 +187,97 @@ export async function updateToolProposalStatus(
   await db.toolProposals.updateOne({ id: proposalId }, { $set: { status, ...updates } });
 }
 
-export async function storeApproval(db: JarvisDatabase, approval: ApprovalRequest): Promise<void> {
+export async function storeToolTask(db: MylaDatabase, task: ToolTask): Promise<void> {
+  await db.toolTasks.insertOne(task);
+}
+
+export async function createToolTask(
+  db: MylaDatabase,
+  input: {
+    sessionId: string;
+    correlationId: string;
+    toolName?: string | null;
+    status: ToolTaskStatus;
+    draftArgs?: Record<string, unknown>;
+    missingFields?: string[];
+    assumptions?: string[];
+    validationErrors?: string[];
+    proposalId?: string | null;
+    approvalId?: string | null;
+    resultStatus?: ToolTask["resultStatus"];
+    resultNotification?: string | null;
+    expiresAt?: string | null;
+  }
+): Promise<ToolTask> {
+  const now = nowIso();
+  const task: ToolTask = {
+    id: crypto.randomUUID(),
+    sessionId: input.sessionId,
+    correlationId: input.correlationId,
+    toolName: input.toolName ?? null,
+    status: input.status,
+    draftArgs: input.draftArgs ?? {},
+    missingFields: input.missingFields ?? [],
+    assumptions: input.assumptions ?? [],
+    validationErrors: input.validationErrors ?? [],
+    proposalId: input.proposalId ?? null,
+    approvalId: input.approvalId ?? null,
+    resultStatus: input.resultStatus ?? null,
+    resultNotification: input.resultNotification ?? null,
+    expiresAt: input.expiresAt ?? null,
+    createdAt: now,
+    updatedAt: now
+  };
+  await storeToolTask(db, task);
+  return task;
+}
+
+export async function updateToolTask(
+  db: MylaDatabase,
+  taskId: string,
+  updates: Partial<Omit<ToolTask, "id" | "sessionId" | "correlationId" | "createdAt" | "updatedAt">>
+): Promise<void> {
+  await db.toolTasks.updateOne({ id: taskId }, { $set: { ...updates, updatedAt: nowIso() } });
+}
+
+export async function updateToolTaskByProposalId(
+  db: MylaDatabase,
+  proposalId: string,
+  updates: Partial<Omit<ToolTask, "id" | "sessionId" | "correlationId" | "createdAt" | "updatedAt">>
+): Promise<void> {
+  await db.toolTasks.updateOne({ proposalId }, { $set: { ...updates, updatedAt: nowIso() } });
+}
+
+export async function listToolTasks(db: MylaDatabase, sessionId?: string, limit = 50): Promise<ToolTask[]> {
+  return db.toolTasks
+    .find(sessionId ? { sessionId } : {}, { projection: { _id: 0 } })
+    .sort({ updatedAt: -1 })
+    .limit(limit)
+    .toArray();
+}
+
+export async function getActiveToolTask(db: MylaDatabase, sessionId: string): Promise<ToolTask | null> {
+  const now = nowIso();
+  return db.toolTasks.findOne(
+    {
+      sessionId,
+      status: { $in: ["draft", "needs_clarification", "queued_for_approval"] },
+      $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }]
+    },
+    { projection: { _id: 0 }, sort: { updatedAt: -1 } }
+  );
+}
+
+export async function storeApproval(db: MylaDatabase, approval: ApprovalRequest): Promise<void> {
   await db.approvals.insertOne(approval);
 }
 
-export async function getApproval(db: JarvisDatabase, approvalId: string): Promise<ApprovalRequest | null> {
+export async function getApproval(db: MylaDatabase, approvalId: string): Promise<ApprovalRequest | null> {
   return db.approvals.findOne({ id: approvalId }, { projection: { _id: 0 } });
 }
 
 export async function updateApprovalStatus(
-  db: JarvisDatabase,
+  db: MylaDatabase,
   approvalId: string,
   status: ApprovalRequest["status"],
   decidedAt = nowIso()
@@ -192,7 +285,7 @@ export async function updateApprovalStatus(
   await db.approvals.updateOne({ id: approvalId }, { $set: { status, decidedAt } });
 }
 
-export async function listPendingApprovals(db: JarvisDatabase): Promise<ApprovalRequest[]> {
+export async function listPendingApprovals(db: MylaDatabase): Promise<ApprovalRequest[]> {
   return db.approvals
     .find({ status: "pending" }, { projection: { _id: 0 } })
     .sort({ expiresAt: 1 })
@@ -200,7 +293,7 @@ export async function listPendingApprovals(db: JarvisDatabase): Promise<Approval
 }
 
 export async function storeMemoryFact(
-  db: JarvisDatabase,
+  db: MylaDatabase,
   fact: MemoryFact,
   embedding?: number[]
 ): Promise<MemoryFact> {
@@ -214,18 +307,30 @@ export async function storeMemoryFact(
   return normalizedFact;
 }
 
-export async function listMemoryFacts(db: JarvisDatabase, limit = 50): Promise<MemoryFact[]> {
+export async function storePlannerTrace(db: MylaDatabase, trace: PlannerTrace): Promise<void> {
+  await db.plannerTraces.insertOne(trace);
+}
+
+export async function listPlannerTraces(db: MylaDatabase, sessionId?: string, limit = 50): Promise<PlannerTrace[]> {
+  return db.plannerTraces
+    .find(sessionId ? { sessionId } : {}, { projection: { _id: 0 } })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .toArray();
+}
+
+export async function listMemoryFacts(db: MylaDatabase, limit = 50): Promise<MemoryFact[]> {
   return db.memoryFacts.find({}, { projection: { _id: 0 } }).sort({ updatedAt: -1 }).limit(limit).toArray();
 }
 
-export async function deleteMemoryFact(db: JarvisDatabase, factId: string): Promise<boolean> {
+export async function deleteMemoryFact(db: MylaDatabase, factId: string): Promise<boolean> {
   const result = await db.memoryFacts.deleteOne({ id: factId });
   await deleteMemoryVector(factId);
   return result.deletedCount > 0;
 }
 
 export async function searchMemoryFacts(
-  db: JarvisDatabase,
+  db: MylaDatabase,
   query: string,
   options: { limit?: number; embedding?: number[] } = {}
 ): Promise<MemorySearchResult[]> {
@@ -260,7 +365,7 @@ export async function searchMemoryFacts(
 }
 
 export async function storeMemoryRelationship(
-  db: JarvisDatabase,
+  db: MylaDatabase,
   relationship: MemoryRelationship
 ): Promise<MemoryRelationship> {
   await db.memoryRelationships.updateOne({ id: relationship.id }, { $set: relationship }, { upsert: true });

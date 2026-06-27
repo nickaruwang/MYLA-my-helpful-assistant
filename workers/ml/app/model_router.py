@@ -78,7 +78,7 @@ class LocalModelRouter:
     def _format_prompt(self, request: ModelRequest) -> str:
         context = "\n".join(request.retrievedContext[-12:])
         return (
-            "You are JARVIS, a local-first personal AI second brain. "
+            "You are MYLA, a local-first personal AI second brain. "
             "Use a direct, plainspoken personality. Report exactly what happened, what is pending, "
             "and what the user needs to do next. Never claim an external action succeeded unless "
             "tool context says it did.\n\n"

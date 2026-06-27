@@ -13,7 +13,7 @@ services:
       - "3000:3000"
     volumes:
       - ../..:/workspace
-      - jarvis-data:/workspace/data
+      - myla-data:/workspace/data
     depends_on:
       - ml-worker
       - mongo
@@ -50,7 +50,7 @@ services:
     ports:
       - "27017:27017"
     volumes:
-      - jarvis-mongo:/data/db
+      - myla-mongo:/data/db
 
   qdrant:
     image: qdrant/qdrant:v1.12.6
@@ -58,9 +58,9 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - jarvis-qdrant:/qdrant/storage
+      - myla-qdrant:/qdrant/storage
 
 volumes:
-  jarvis-data:
-  jarvis-mongo:
-  jarvis-qdrant:
+  myla-data:
+  myla-mongo:
+  myla-qdrant:

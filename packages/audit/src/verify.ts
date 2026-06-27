@@ -1,4 +1,4 @@
-import { migrate, openDatabase } from "@jarvis/db";
+import { migrate, openDatabase } from "@myla/db";
 import { verifyAuditChain } from "./index.js";
 
 const db = await openDatabase();

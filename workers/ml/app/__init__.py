@@ -1,1 +1,1 @@
-"""JARVIS ML worker package."""
+"""MYLA ML worker package."""

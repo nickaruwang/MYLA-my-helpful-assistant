@@ -26,6 +26,29 @@ export const ToolProposalStatusSchema = z.enum([
 ]);
 export type ToolProposalStatus = z.infer<typeof ToolProposalStatusSchema>;
 
+export const ToolTaskStatusSchema = z.enum([
+  "draft",
+  "needs_clarification",
+  "queued_for_approval",
+  "executing",
+  "executed",
+  "blocked",
+  "failed",
+  "cancelled",
+  "expired"
+]);
+export type ToolTaskStatus = z.infer<typeof ToolTaskStatusSchema>;
+
+export const ProviderStatusSchema = z.object({
+  provider: z.string(),
+  status: z.enum(["ready", "needs_setup", "disabled", "degraded"]),
+  message: z.string(),
+  requiredScopes: z.array(z.string()).default([]),
+  missingConfig: z.array(z.string()).default([]),
+  tools: z.array(z.string()).default([])
+});
+export type ProviderStatus = z.infer<typeof ProviderStatusSchema>;
+
 export const InputModeSchema = z.enum(["chat", "voice"]).default("chat");
 export type InputMode = z.infer<typeof InputModeSchema>;
 
@@ -113,6 +136,39 @@ export const ToolResultSchema = z.object({
 });
 export type ToolResult = z.infer<typeof ToolResultSchema>;
 
+export const ToolTaskSchema = z.object({
+  id: z.string(),
+  sessionId: z.string(),
+  correlationId: z.string(),
+  toolName: z.string().nullable(),
+  status: ToolTaskStatusSchema,
+  draftArgs: z.record(z.unknown()).default({}),
+  missingFields: z.array(z.string()).default([]),
+  assumptions: z.array(z.string()).default([]),
+  validationErrors: z.array(z.string()).default([]),
+  proposalId: z.string().nullable().default(null),
+  approvalId: z.string().nullable().default(null),
+  resultStatus: ToolResultSchema.shape.status.nullable().default(null),
+  resultNotification: z.string().nullable().default(null),
+  expiresAt: z.string().nullable().default(null),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+export type ToolTask = z.infer<typeof ToolTaskSchema>;
+
+export const PlannerTraceSchema = z.object({
+  id: z.string(),
+  sessionId: z.string(),
+  correlationId: z.string(),
+  selectedToolNames: z.array(z.string()).default([]),
+  rawModelResponse: z.string().nullable().default(null),
+  plannerResult: z.string(),
+  fallbackReason: z.string().nullable().default(null),
+  validationErrors: z.array(z.string()).default([]),
+  createdAt: z.string()
+});
+export type PlannerTrace = z.infer<typeof PlannerTraceSchema>;
+
 export const AuditEventKindSchema = z.enum([
   "request.received",
   "message.stored",
@@ -143,11 +199,27 @@ export const AuditEventSchema = z.object({
 });
 export type AuditEvent = z.infer<typeof AuditEventSchema>;
 
+export const MemoryCategorySchema = z.enum([
+  "preference",
+  "contact",
+  "place",
+  "project",
+  "recurring_task",
+  "provider_fact",
+  "tool_outcome",
+  "general"
+]);
+export type MemoryCategory = z.infer<typeof MemoryCategorySchema>;
+
 export const MemoryFactSchema = z.object({
   id: z.string(),
   subject: z.string(),
   predicate: z.string(),
   object: z.string(),
+  category: MemoryCategorySchema.optional(),
+  sensitivity: PrivacyClassSchema.optional(),
+  sourceToolResultId: z.string().nullable().optional(),
+  lastConfirmedAt: z.string().nullable().optional(),
   sourceMessageId: z.string().nullable(),
   confidence: z.number().min(0).max(1),
   embeddingId: z.string().nullable().default(null),
@@ -187,6 +259,8 @@ export const ChatResponseSchema = z.object({
   message: ChatMessageSchema,
   toolResults: z.array(ToolResultSchema),
   approvals: z.array(ApprovalRequestSchema),
+  tasks: z.array(ToolTaskSchema).default([]),
+  providerStatuses: z.array(ProviderStatusSchema).default([]),
   memories: z.array(MemorySearchResultSchema).default([]),
   storedMemories: z.array(MemoryFactSchema).default([])
 });
@@ -202,6 +276,8 @@ export const MemoryCreateRequestSchema = z.object({
   subject: z.string().default("user"),
   predicate: z.string().default("memory"),
   object: z.string().min(1),
+  category: MemoryCategorySchema.default("general"),
+  sensitivity: PrivacyClassSchema.default("personal"),
   confidence: z.number().min(0).max(1).default(0.8)
 });
 export type MemoryCreateRequest = z.infer<typeof MemoryCreateRequestSchema>;

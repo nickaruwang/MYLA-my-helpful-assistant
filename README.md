@@ -1,4 +1,4 @@
-# JARVIS Second Brain
+# MYLA
 
 Local-first personal AI assistant skeleton with a TypeScript control plane and Python ML worker.
 
@@ -76,5 +76,5 @@ The app requests Calendar read/events, Drive metadata read, and Gmail compose. C
 If you have data from the earlier SQLite skeleton and the `sqlite3` CLI is installed:
 
 ```bash
-pnpm --filter @jarvis/db import:sqlite -- ./data/jarvis.sqlite
+pnpm --filter @myla/db import:sqlite -- ./data/myla.sqlite
 ```

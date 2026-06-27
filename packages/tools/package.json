@@ -1,5 +1,5 @@
 {
-  "name": "@jarvis/tools",
+  "name": "@myla/tools",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,8 +11,8 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@jarvis/policy": "workspace:*",
-    "@jarvis/shared": "workspace:*",
+    "@myla/policy": "workspace:*",
+    "@myla/shared": "workspace:*",
     "googleapis": "^144.0.0",
     "zod": "^3.24.1"
   },

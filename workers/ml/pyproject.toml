@@ -1,5 +1,5 @@
 [project]
-name = "jarvis-ml-worker"
+name = "myla-ml-worker"
 version = "0.1.0"
 description = "Python ML worker for local LLM inference and future voice pipelines."
 requires-python = ">=3.11"

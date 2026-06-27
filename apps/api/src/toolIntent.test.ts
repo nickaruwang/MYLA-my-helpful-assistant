@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { registerDefaultTools } from "@jarvis/tools";
+import { registerDefaultTools } from "@myla/tools";
 import { inferToolIntent } from "./toolIntent.js";
 
 registerDefaultTools();

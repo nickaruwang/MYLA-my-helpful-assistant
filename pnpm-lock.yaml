@@ -26,19 +26,19 @@ importers:
       '@hono/node-server':
         specifier: ^1.13.8
         version: 1.19.14(hono@4.12.23)
-      '@jarvis/audit':
+      '@myla/audit':
         specifier: workspace:*
         version: link:../../packages/audit
-      '@jarvis/db':
+      '@myla/db':
         specifier: workspace:*
         version: link:../../packages/db
-      '@jarvis/policy':
+      '@myla/policy':
         specifier: workspace:*
         version: link:../../packages/policy
-      '@jarvis/shared':
+      '@myla/shared':
         specifier: workspace:*
         version: link:../../packages/shared
-      '@jarvis/tools':
+      '@myla/tools':
         specifier: workspace:*
         version: link:../../packages/tools
       hono:
@@ -60,7 +60,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@jarvis/shared':
+      '@myla/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@vitejs/plugin-react':
@@ -91,10 +91,10 @@ importers:
 
   packages/audit:
     dependencies:
-      '@jarvis/db':
+      '@myla/db':
         specifier: workspace:*
         version: link:../db
-      '@jarvis/shared':
+      '@myla/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
@@ -107,7 +107,7 @@ importers:
 
   packages/db:
     dependencies:
-      '@jarvis/shared':
+      '@myla/shared':
         specifier: workspace:*
         version: link:../shared
       mongodb:
@@ -123,7 +123,7 @@ importers:
 
   packages/policy:
     dependencies:
-      '@jarvis/shared':
+      '@myla/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
@@ -149,10 +149,10 @@ importers:
 
   packages/tools:
     dependencies:
-      '@jarvis/policy':
+      '@myla/policy':
         specifier: workspace:*
         version: link:../policy
-      '@jarvis/shared':
+      '@myla/shared':
         specifier: workspace:*
         version: link:../shared
       googleapis:

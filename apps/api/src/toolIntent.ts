@@ -1,4 +1,4 @@
-import { listTools } from "@jarvis/tools";
+import { listTools } from "@myla/tools";
 
 export interface InferredToolIntent {
   toolName: string;

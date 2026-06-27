@@ -1,4 +1,4 @@
-import type { ApprovalMode, ModelRoute, PrivacyClass, RiskLevel } from "@jarvis/shared";
+import type { ApprovalMode, ModelRoute, PrivacyClass, RiskLevel } from "@myla/shared";
 
 export interface IntentPolicyInput {
   text: string;

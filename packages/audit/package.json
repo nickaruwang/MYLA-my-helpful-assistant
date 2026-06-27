@@ -1,5 +1,5 @@
 {
-  "name": "@jarvis/audit",
+  "name": "@myla/audit",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,8 +12,8 @@
     "verify": "tsx src/verify.ts"
   },
   "dependencies": {
-    "@jarvis/db": "workspace:*",
-    "@jarvis/shared": "workspace:*"
+    "@myla/db": "workspace:*",
+    "@myla/shared": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

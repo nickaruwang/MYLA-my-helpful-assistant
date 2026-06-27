@@ -1,13 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { google } from "googleapis";
 import { z } from "zod";
 import type { ToolDefinition } from "./index.js";
+import type { ProviderStatus } from "@myla/shared";
 
 export const GOOGLE_SAFE_SCOPES = [
   "https://www.googleapis.com/auth/calendar.readonly",
   "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/drive.metadata.readonly",
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.compose"
 ] as const;
 
@@ -32,8 +35,31 @@ export async function saveGoogleTokensFromCode(code: string): Promise<void> {
   writeFileSync(tokenPath, JSON.stringify(tokens, null, 2));
 }
 
+export function getGoogleProviderStatus(): ProviderStatus {
+  const missingConfig = [
+    !process.env.GOOGLE_CLIENT_ID ? "GOOGLE_CLIENT_ID" : undefined,
+    !process.env.GOOGLE_CLIENT_SECRET ? "GOOGLE_CLIENT_SECRET" : undefined,
+    !process.env.GOOGLE_REDIRECT_URI ? "GOOGLE_REDIRECT_URI" : undefined
+  ].filter((value): value is string => Boolean(value));
+  const tokenExists = existsSync(getTokenPath());
+
+  return {
+    provider: "google",
+    status: missingConfig.length > 0 ? "needs_setup" : tokenExists ? "ready" : "needs_setup",
+    message:
+      missingConfig.length > 0
+        ? `Google OAuth config is missing: ${missingConfig.join(", ")}.`
+        : tokenExists
+          ? "Google OAuth token is available."
+          : "Google OAuth token is missing. Visit /oauth/google/start.",
+    requiredScopes: [...GOOGLE_SAFE_SCOPES],
+    missingConfig: tokenExists ? missingConfig : [...missingConfig, "GOOGLE_TOKEN_PATH"],
+    tools: []
+  };
+}
+
 export function createSafeGoogleTools(): ToolDefinition[] {
-  return [
+  const tools: ToolDefinition[] = [
     {
       name: "google.calendar.read_schedule",
       provider: "google",
@@ -128,6 +154,7 @@ export function createSafeGoogleTools(): ToolDefinition[] {
         endIso: "What end time should I use?"
       },
       dryRun: (args) => `Create calendar event "${args.summary}" from ${args.startIso} to ${args.endIso}.`,
+      validate: (args) => validateCalendarRange(args.startIso, args.endIso),
       execute: async (args) => {
         const auth = getAuthorizedClientOrNull();
         if (!auth) {
@@ -157,6 +184,107 @@ export function createSafeGoogleTools(): ToolDefinition[] {
           tool: "calendar.create_event",
           eventId: response.data.id,
           htmlLink: response.data.htmlLink
+        };
+      },
+      verify: verifyCalendarEvent
+    },
+    {
+      name: "google.calendar.update_event",
+      provider: "google",
+      operation: "update calendar event",
+      description: "Update an existing Google Calendar event after manual approval.",
+      requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
+      riskLevel: "high",
+      approvalMode: "manual",
+      argsSchema: z.object({
+        calendarId: z.string().default("primary"),
+        eventId: z.string().min(1),
+        summary: z.string().optional(),
+        description: z.string().optional(),
+        location: z.string().optional(),
+        startIso: z.string().datetime({ offset: true }).optional(),
+        endIso: z.string().datetime({ offset: true }).optional(),
+        timeZone: z.string().default("America/Los_Angeles")
+      }),
+      clarificationPrompts: {
+        eventId: "Which calendar event should I update?"
+      },
+      dryRun: (args) => `Update calendar event ${args.eventId} with ${JSON.stringify(args)}.`,
+      validate: (args) => validateCalendarRange(args.startIso, args.endIso),
+      execute: async (args) => {
+        const auth = getAuthorizedClientOrNull();
+        if (!auth) {
+          return notConfigured("calendar.update_event");
+        }
+
+        const calendar = google.calendar({ version: "v3", auth });
+        const requestBody: Record<string, unknown> = {
+          summary: asString(args.summary),
+          description: asString(args.description),
+          location: asString(args.location)
+        };
+        if (asString(args.startIso)) {
+          requestBody.start = {
+            dateTime: asString(args.startIso),
+            timeZone: asString(args.timeZone) ?? "America/Los_Angeles"
+          };
+        }
+        if (asString(args.endIso)) {
+          requestBody.end = {
+            dateTime: asString(args.endIso),
+            timeZone: asString(args.timeZone) ?? "America/Los_Angeles"
+          };
+        }
+
+        const response = await calendar.events.patch({
+          calendarId: asString(args.calendarId) ?? "primary",
+          eventId: asString(args.eventId) ?? "",
+          requestBody
+        });
+
+        return {
+          provider: "google",
+          tool: "calendar.update_event",
+          eventId: response.data.id,
+          htmlLink: response.data.htmlLink
+        };
+      },
+      verify: verifyCalendarEvent
+    },
+    {
+      name: "google.calendar.delete_event",
+      provider: "google",
+      operation: "delete calendar event",
+      description: "Delete an existing Google Calendar event after manual approval.",
+      requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
+      riskLevel: "high",
+      approvalMode: "manual",
+      argsSchema: z.object({
+        calendarId: z.string().default("primary"),
+        eventId: z.string().min(1),
+        summary: z.string().optional()
+      }),
+      clarificationPrompts: {
+        eventId: "Which calendar event should I delete?"
+      },
+      dryRun: (args) => `Delete calendar event ${args.eventId}${args.summary ? ` (${args.summary})` : ""}.`,
+      execute: async (args) => {
+        const auth = getAuthorizedClientOrNull();
+        if (!auth) {
+          return notConfigured("calendar.delete_event");
+        }
+
+        const calendar = google.calendar({ version: "v3", auth });
+        await calendar.events.delete({
+          calendarId: asString(args.calendarId) ?? "primary",
+          eventId: asString(args.eventId) ?? ""
+        });
+
+        return {
+          provider: "google",
+          tool: "calendar.delete_event",
+          eventId: asString(args.eventId),
+          verified: true
         };
       }
     },
@@ -204,7 +332,7 @@ export function createSafeGoogleTools(): ToolDefinition[] {
         }
 
         const to = asString(args.to) ?? "recipient@example.com";
-        const subject = asString(args.subject) ?? "Draft from JARVIS";
+        const subject = asString(args.subject) ?? "Draft from MYLA";
         const body = ensureEmailSignature(
           asString(args.body) ?? asString(args.query) ?? "Draft body goes here.",
           getEmailSignatureName()
@@ -226,6 +354,60 @@ export function createSafeGoogleTools(): ToolDefinition[] {
           bodyPreview: body.slice(0, 500),
           draftId: response.data.id,
           messageId: response.data.message?.id
+        };
+      }
+    },
+    {
+      name: "google.gmail.search_messages",
+      provider: "google",
+      operation: "search gmail metadata",
+      description: "Search Gmail message metadata and return sender, subject, and date without body content.",
+      requiredScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      riskLevel: "sensitive",
+      approvalMode: "manual",
+      argsSchema: z.object({
+        query: z.string().min(1),
+        maxResults: z.number().min(1).max(20).default(10)
+      }),
+      dryRun: (args) => `Search Gmail metadata for "${args.query}".`,
+      execute: async (args) => {
+        const auth = getAuthorizedClientOrNull();
+        if (!auth) {
+          return notConfigured("gmail.search_messages");
+        }
+
+        const gmail = google.gmail({ version: "v1", auth });
+        const response = await gmail.users.messages.list({
+          userId: "me",
+          q: asString(args.query),
+          maxResults: asNumber(args.maxResults) ?? 10
+        });
+        const messages = await Promise.all(
+          (response.data.messages ?? []).map(async (message) => {
+            const detail = await gmail.users.messages.get({
+              userId: "me",
+              id: message.id ?? "",
+              format: "metadata",
+              metadataHeaders: ["From", "Subject", "Date"]
+            });
+            const headers = Object.fromEntries(
+              (detail.data.payload?.headers ?? []).map((header) => [header.name?.toLowerCase() ?? "", header.value])
+            );
+            return {
+              id: detail.data.id,
+              threadId: detail.data.threadId,
+              from: headers.from,
+              subject: headers.subject,
+              date: headers.date,
+              snippet: detail.data.snippet
+            };
+          })
+        );
+
+        return {
+          provider: "google",
+          tool: "gmail.search_messages",
+          messages
         };
       }
     },
@@ -326,8 +508,53 @@ export function createSafeGoogleTools(): ToolDefinition[] {
           files: response.data.files ?? []
         };
       }
+    },
+    {
+      name: "google.drive.read_file",
+      provider: "google",
+      operation: "read drive file text",
+      description: "Read text content from a specific Google Drive file after manual approval.",
+      requiredScopes: ["https://www.googleapis.com/auth/drive.readonly"],
+      riskLevel: "sensitive",
+      approvalMode: "manual",
+      argsSchema: z.object({
+        fileId: z.string().min(1),
+        mimeType: z.string().optional(),
+        name: z.string().optional()
+      }),
+      clarificationPrompts: {
+        fileId: "Which Drive file should I read?"
+      },
+      dryRun: (args) => `Read text content from Drive file ${args.name ?? args.fileId}.`,
+      execute: async (args) => {
+        const auth = getAuthorizedClientOrNull();
+        if (!auth) {
+          return notConfigured("drive.read_file");
+        }
+
+        const drive = google.drive({ version: "v3", auth });
+        const metadata = await drive.files.get({
+          fileId: asString(args.fileId) ?? "",
+          fields: "id,name,mimeType,webViewLink,modifiedTime"
+        });
+        const mimeType = metadata.data.mimeType ?? asString(args.mimeType);
+        const text =
+          mimeType === "application/vnd.google-apps.document"
+            ? await exportDriveText(drive, asString(args.fileId) ?? "")
+            : await downloadDriveText(drive, asString(args.fileId) ?? "");
+
+        return {
+          provider: "google",
+          tool: "drive.read_file",
+          file: metadata.data,
+          textPreview: text.slice(0, 4000),
+          truncated: text.length > 4000
+        };
+      }
     }
   ];
+
+  return tools.map((tool) => ({ ...tool, getProviderStatus: getGoogleProviderStatus }));
 }
 
 function getOAuthClient() {
@@ -369,6 +596,77 @@ function notConfigured(tool: string) {
     tool,
     message: "Google OAuth is not configured yet. Visit /oauth/google/start after setting credentials."
   };
+}
+
+function validateCalendarRange(startIso: unknown, endIso: unknown): string[] {
+  if (!startIso || !endIso) {
+    return [];
+  }
+
+  const start = new Date(String(startIso));
+  const end = new Date(String(endIso));
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return ["Calendar start and end times must be valid datetimes."];
+  }
+
+  if (end <= start) {
+    return ["Calendar end time must be after the start time."];
+  }
+
+  return [];
+}
+
+async function verifyCalendarEvent(args: Record<string, unknown>, data: unknown): Promise<unknown> {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return data;
+  }
+
+  const auth = getAuthorizedClientOrNull();
+  const eventId = asString((data as Record<string, unknown>).eventId);
+  if (!auth || !eventId) {
+    return data;
+  }
+
+  const calendar = google.calendar({ version: "v3", auth });
+  const verified = await calendar.events.get({
+    calendarId: asString(args.calendarId) ?? "primary",
+    eventId
+  });
+
+  return {
+    ...(data as Record<string, unknown>),
+    verified: true,
+    event: {
+      id: verified.data.id,
+      summary: verified.data.summary,
+      htmlLink: verified.data.htmlLink,
+      start: verified.data.start,
+      end: verified.data.end,
+      location: verified.data.location
+    }
+  };
+}
+
+async function exportDriveText(drive: ReturnType<typeof google.drive>, fileId: string): Promise<string> {
+  const response = await drive.files.export(
+    {
+      fileId,
+      mimeType: "text/plain"
+    },
+    { responseType: "text" }
+  );
+  return typeof response.data === "string" ? response.data : String(response.data ?? "");
+}
+
+async function downloadDriveText(drive: ReturnType<typeof google.drive>, fileId: string): Promise<string> {
+  const response = await drive.files.get(
+    {
+      fileId,
+      alt: "media"
+    },
+    { responseType: "text" }
+  );
+  return typeof response.data === "string" ? response.data : String(response.data ?? "");
 }
 
 function asString(value: unknown): string | undefined {

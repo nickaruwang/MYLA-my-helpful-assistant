@@ -1,27 +1,33 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
-import { appendAuditEvent, verifyAuditChain } from "@jarvis/audit";
+import { appendAuditEvent, verifyAuditChain } from "@myla/audit";
 import {
   deleteMemoryFact,
   ensureSession,
   getApproval,
+  getActiveToolTask,
   getToolProposal,
   listMemoryFacts,
   listMessages,
   listPendingApprovals,
+  listPlannerTraces,
   listSessions,
+  listToolTasks,
   migrate,
   nowIso,
   openDatabase,
   searchMemoryFacts,
   storeApproval,
   storeMemoryFact,
+  storePlannerTrace,
   storeMessage,
   storeToolProposal,
+  createToolTask,
   updateApprovalStatus,
-  updateToolProposalStatus
-} from "@jarvis/db";
-import { classifyIntent } from "@jarvis/policy";
+  updateToolProposalStatus,
+  updateToolTaskByProposalId
+} from "@myla/db";
+import { classifyIntent } from "@myla/policy";
 import {
   ApprovalDecisionRequestSchema,
   ChatRequestSchema,
@@ -29,18 +35,20 @@ import {
   type ApprovalRequest,
   type ChatMessage,
   type MemoryFact,
+  type ToolTask,
   type ToolResult
-} from "@jarvis/shared";
+} from "@myla/shared";
 import {
   executeRegisteredTool,
   getGoogleAuthUrl,
   GOOGLE_SAFE_SCOPES,
   hasGoogleOAuthConfig,
   listPublicTools,
+  listProviderStatuses,
   proposeAndMaybeExecuteTool,
   registerDefaultTools,
   saveGoogleTokensFromCode
-} from "@jarvis/tools";
+} from "@myla/tools";
 import { callMlWorker, embedText } from "./modelClient.js";
 import { planToolCall } from "./toolPlanner.js";
 
@@ -81,7 +89,7 @@ app.onError((error, c) => {
 app.get("/health", (c) =>
   c.json({
     ok: true,
-    service: "jarvis-api",
+    service: "myla-api",
     storage: "mongodb",
     mlWorkerUrl: process.env.ML_WORKER_URL ?? "http://localhost:8001"
   })
@@ -91,6 +99,22 @@ app.get("/tools", (c) =>
   c.json({
     tools: listPublicTools()
   })
+);
+
+app.get("/providers", (c) =>
+  c.json({
+    providers: listProviderStatuses()
+  })
+);
+
+app.get("/tasks", async (c) => c.json({ tasks: await listToolTasks(db, undefined, Number(c.req.query("limit") ?? 50)) }));
+
+app.get("/sessions/:sessionId/tasks", async (c) =>
+  c.json({ tasks: await listToolTasks(db, c.req.param("sessionId"), Number(c.req.query("limit") ?? 50)) })
+);
+
+app.get("/planner-traces", async (c) =>
+  c.json({ traces: await listPlannerTraces(db, c.req.query("sessionId") ?? undefined, Number(c.req.query("limit") ?? 50)) })
 );
 
 app.get("/oauth/google/start", (c) => {
@@ -180,6 +204,11 @@ app.post("/approvals/:approvalId/decision", async (c) => {
   });
 
   if (parsed.data.decision === "rejected") {
+    await updateToolTaskByProposalId(db, proposal.id, {
+      status: "blocked",
+      resultStatus: "blocked",
+      resultNotification: `Rejected: ${proposal.dryRunSummary}`
+    });
     return c.json({
       approval: { ...approval, status: "rejected", decidedAt: now },
       toolResult: {
@@ -192,8 +221,13 @@ app.post("/approvals/:approvalId/decision", async (c) => {
   }
 
   const toolResult = await executeRegisteredTool(proposal);
-  await updateToolProposalStatus(db, proposal.id, toolResult.status === "executed" ? "executed" : "failed", {
+  await updateToolProposalStatus(db, proposal.id, proposalStatusForToolResult(toolResult), {
     executedAt: nowIso()
+  });
+  await updateToolTaskByProposalId(db, proposal.id, {
+    status: taskStatusForToolResult(toolResult),
+    resultStatus: toolResult.status,
+    resultNotification: toolResult.notification
   });
   await appendAuditEvent(db, {
     actor: "tool",
@@ -230,6 +264,8 @@ app.post("/memory", async (c) => {
     subject: parsed.data.subject,
     predicate: parsed.data.predicate,
     object: parsed.data.object,
+    category: parsed.data.category,
+    sensitivity: parsed.data.sensitivity,
     confidence: parsed.data.confidence,
     sourceMessageId: null
   });
@@ -269,6 +305,16 @@ app.get("/voice/status", async (c) => {
 
 app.get("/audit/verify", async (c) => c.json(await verifyAuditChain(db)));
 
+app.get("/audit/events", async (c) => {
+  const correlationId = c.req.query("correlationId");
+  const events = await db.auditEvents
+    .find(correlationId ? { correlationId } : {}, { projection: { _id: 0 } })
+    .sort({ seq: -1 })
+    .limit(Number(c.req.query("limit") ?? 50))
+    .toArray();
+  return c.json({ events });
+});
+
 app.post("/chat", async (c) => {
   const parsed = ChatRequestSchema.safeParse(await c.req.json());
   if (!parsed.success) {
@@ -306,9 +352,22 @@ app.post("/chat", async (c) => {
   });
 
   const planningMessages = await listMessages(db, sessionId, 10);
+  const activeTask = await getActiveToolTask(db, sessionId);
   const conversationContext = buildPlanningContext(planningMessages, userMessage);
+  if (activeTask) {
+    conversationContext.push({
+      actor: "system",
+      content: `Active tool task: ${activeTask.toolName ?? "unknown tool"} with draft args ${JSON.stringify(
+        activeTask.draftArgs
+      )}, missing fields ${activeTask.missingFields.join(", ") || "none"}, assumptions ${
+        activeTask.assumptions.join("; ") || "none"
+      }.`,
+      createdAt: activeTask.updatedAt
+    });
+  }
   const toolResults: ToolResult[] = [];
   const approvals: ApprovalRequest[] = [];
+  const tasks: ToolTask[] = [];
   const toolPlanning = await planToolCall({
     message: parsed.data.message,
     sessionId,
@@ -319,7 +378,34 @@ app.post("/chat", async (c) => {
     conversationContext
   });
 
+  if (toolPlanning.trace) {
+    await storePlannerTrace(db, {
+      id: crypto.randomUUID(),
+      sessionId,
+      correlationId,
+      selectedToolNames: toolPlanning.trace.selectedToolNames,
+      rawModelResponse: toolPlanning.trace.rawModelResponse,
+      plannerResult: toolPlanning.trace.plannerResult,
+      fallbackReason: toolPlanning.trace.fallbackReason,
+      validationErrors: toolPlanning.trace.validationErrors,
+      createdAt: nowIso()
+    });
+  }
+
   if (toolPlanning.kind === "clarification") {
+    const task = await createToolTask(db, {
+      sessionId,
+      correlationId,
+      toolName: toolPlanning.plan?.toolName,
+      status: "needs_clarification",
+      draftArgs: toolPlanning.plan?.args,
+      missingFields: toolPlanning.plan?.missingFields,
+      assumptions: toolPlanning.plan?.assumptions,
+      validationErrors: toolPlanning.trace?.validationErrors ?? [toolPlanning.message],
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+    });
+    tasks.push(task);
+
     const assistantMessage = await storeMessage(db, {
       sessionId,
       actor: "assistant",
@@ -345,6 +431,8 @@ app.post("/chat", async (c) => {
       message: assistantMessage,
       toolResults,
       approvals,
+      tasks,
+      providerStatuses: listProviderStatuses(),
       memories: [],
       storedMemories: []
     });
@@ -371,8 +459,22 @@ app.post("/chat", async (c) => {
     });
 
     await storeToolProposal(db, decision.proposal);
-    if (decision.result.status === "executed" || decision.result.status === "failed") {
-      await updateToolProposalStatus(db, decision.proposal.id, decision.result.status, { executedAt: nowIso() });
+    const task = await createToolTask(db, {
+      sessionId,
+      correlationId,
+      toolName: decision.proposal.toolName,
+      status: taskStatusForToolResult(decision.result),
+      draftArgs: decision.proposal.args,
+      assumptions: decision.proposal.assumptions,
+      proposalId: decision.proposal.id,
+      approvalId: decision.approval?.id,
+      resultStatus: decision.result.status,
+      resultNotification: decision.result.notification,
+      expiresAt: decision.approval?.expiresAt ?? null
+    });
+    tasks.push(task);
+    if (decision.result.status === "executed" || decision.result.status === "failed" || decision.result.status === "blocked") {
+      await updateToolProposalStatus(db, decision.proposal.id, proposalStatusForToolResult(decision.result), { executedAt: nowIso() });
     }
     await appendAuditEvent(db, {
       actor: "system",
@@ -418,6 +520,20 @@ app.post("/chat", async (c) => {
     });
     if (sendDraftDecision) {
       await storeToolProposal(db, sendDraftDecision.proposal);
+      const sendTask = await createToolTask(db, {
+        sessionId,
+        correlationId,
+        toolName: sendDraftDecision.proposal.toolName,
+        status: taskStatusForToolResult(sendDraftDecision.result),
+        draftArgs: sendDraftDecision.proposal.args,
+        assumptions: sendDraftDecision.proposal.assumptions,
+        proposalId: sendDraftDecision.proposal.id,
+        approvalId: sendDraftDecision.approval?.id,
+        resultStatus: sendDraftDecision.result.status,
+        resultNotification: sendDraftDecision.result.notification,
+        expiresAt: sendDraftDecision.approval?.expiresAt ?? null
+      });
+      tasks.push(sendTask);
       await appendAuditEvent(db, {
         actor: "system",
         kind: "tool.proposed",
@@ -469,6 +585,19 @@ app.post("/chat", async (c) => {
   if (!assistantText && toolPlanning.kind === "none") {
     assistantText = buildNoToolActionResponse(parsed.data.message, conversationContext);
     assistantSource = assistantText ? "action-guard" : undefined;
+    if (assistantText) {
+      tasks.push(
+        await createToolTask(db, {
+          sessionId,
+          correlationId,
+          toolName: null,
+          status: "blocked",
+          validationErrors: [toolPlanning.reason],
+          resultStatus: "blocked",
+          resultNotification: assistantText
+        })
+      );
+    }
   }
 
   if (!assistantText) {
@@ -519,7 +648,10 @@ app.post("/chat", async (c) => {
     correlationId
   });
 
-  const storedMemories = await maybeStoreMemoryFromMessage(parsed.data.message, userMessage.id, correlationId);
+  const storedMemories = [
+    ...(await maybeStoreMemoryFromToolResults(toolResults, correlationId)),
+    ...(await maybeStoreMemoryFromMessage(parsed.data.message, userMessage.id, correlationId))
+  ];
 
   return c.json({
     sessionId,
@@ -527,6 +659,8 @@ app.post("/chat", async (c) => {
     message: assistantMessage,
     toolResults,
     approvals,
+    tasks,
+    providerStatuses: listProviderStatuses(),
     memories,
     storedMemories
   });
@@ -619,6 +753,29 @@ function buildPlanningContext(messages: ChatMessage[], currentMessage: ChatMessa
       content: message.content,
       createdAt: message.createdAt
     }));
+}
+
+function taskStatusForToolResult(result: ToolResult): ToolTask["status"] {
+  if (result.status === "queued_for_approval") {
+    return "queued_for_approval";
+  }
+  if (result.status === "executed") {
+    return "executed";
+  }
+  if (result.status === "blocked") {
+    return "blocked";
+  }
+  return "failed";
+}
+
+function proposalStatusForToolResult(result: ToolResult) {
+  if (result.status === "executed") {
+    return "executed" as const;
+  }
+  if (result.status === "blocked") {
+    return "blocked" as const;
+  }
+  return "failed" as const;
 }
 
 function buildNoToolActionResponse(message: string, context: Array<{ actor: string; content: string }>): string | undefined {
@@ -723,6 +880,66 @@ function stringField(value: object, key: string): string | undefined {
   return typeof field === "string" && field.trim() ? field : undefined;
 }
 
+async function maybeStoreMemoryFromToolResults(toolResults: ToolResult[], correlationId: string): Promise<MemoryFact[]> {
+  const stored: MemoryFact[] = [];
+  for (const result of toolResults) {
+    if (result.status !== "executed") {
+      continue;
+    }
+
+    const data = resultData(result);
+    const outcome = memoryOutcomeForToolResult(result, data);
+    if (!outcome) {
+      continue;
+    }
+
+    const fact = await createMemoryFact({
+      subject: outcome.subject,
+      predicate: outcome.predicate,
+      object: outcome.object,
+      category: "tool_outcome",
+      sensitivity: outcome.sensitivity,
+      confidence: 0.85,
+      sourceMessageId: null,
+      sourceToolResultId: result.proposalId
+    });
+    stored.push(fact);
+    await appendAuditEvent(db, {
+      actor: "system",
+      kind: "memory.stored",
+      correlationId,
+      payload: { factId: fact.id, subject: fact.subject, predicate: fact.predicate, sourceToolResultId: result.proposalId }
+    });
+  }
+
+  return stored;
+}
+
+function memoryOutcomeForToolResult(
+  result: ToolResult,
+  data: Record<string, unknown>
+): { subject: string; predicate: string; object: string; sensitivity: MemoryFact["sensitivity"] } | undefined {
+  if (result.toolName === "google.calendar.create_event") {
+    return {
+      subject: "calendar",
+      predicate: "created_event",
+      object: `${stringField(data, "eventId") ?? "event"}${stringField(data, "htmlLink") ? ` ${stringField(data, "htmlLink")}` : ""}`,
+      sensitivity: "personal"
+    };
+  }
+
+  if (result.toolName === "google.gmail.send_draft") {
+    return {
+      subject: "gmail",
+      predicate: "sent_draft",
+      object: `${stringField(data, "subject") ?? "draft"}${stringField(data, "to") ? ` to ${stringField(data, "to")}` : ""}`,
+      sensitivity: "personal"
+    };
+  }
+
+  return undefined;
+}
+
 async function maybeStoreMemoryFromMessage(
   message: string,
   sourceMessageId: string,
@@ -747,15 +964,19 @@ async function maybeStoreMemoryFromMessage(
 }
 
 function extractMemoryCandidates(message: string, sourceMessageId: string): MemoryFact[] {
-  const candidates: Array<{ predicate: string; object: string }> = [];
+  const candidates: Array<{ predicate: string; object: string; category?: MemoryFact["category"] }> = [];
   const rememberMatch = message.match(/\bremember that\s+(.+)$/i);
   if (rememberMatch?.[1]) {
-    candidates.push({ predicate: "remembered", object: rememberMatch[1].trim() });
+    candidates.push({ predicate: "remembered", object: rememberMatch[1].trim(), category: "general" });
   }
 
   const preferenceMatch = message.match(/\bmy\s+([a-z][a-z\s]{1,40})\s+is\s+(.+)$/i);
   if (preferenceMatch?.[1] && preferenceMatch[2]) {
-    candidates.push({ predicate: preferenceMatch[1].trim().replace(/\s+/g, "_"), object: preferenceMatch[2].trim() });
+    candidates.push({
+      predicate: preferenceMatch[1].trim().replace(/\s+/g, "_"),
+      object: preferenceMatch[2].trim(),
+      category: "preference"
+    });
   }
 
   const now = nowIso();
@@ -764,6 +985,10 @@ function extractMemoryCandidates(message: string, sourceMessageId: string): Memo
     subject: "user",
     predicate: candidate.predicate,
     object: candidate.object,
+    category: candidate.category ?? "general",
+    sensitivity: "personal",
+    lastConfirmedAt: now,
+    sourceToolResultId: null,
     sourceMessageId,
     confidence: 0.75,
     embeddingId: null,
@@ -776,8 +1001,11 @@ async function createMemoryFact(input: {
   subject: string;
   predicate: string;
   object: string;
+  category?: MemoryFact["category"];
+  sensitivity?: MemoryFact["sensitivity"];
   confidence: number;
   sourceMessageId: string | null;
+  sourceToolResultId?: string | null;
 }): Promise<MemoryFact> {
   const now = nowIso();
   const fact: MemoryFact = {
@@ -785,6 +1013,10 @@ async function createMemoryFact(input: {
     subject: input.subject,
     predicate: input.predicate,
     object: input.object,
+    category: input.category ?? "general",
+    sensitivity: input.sensitivity ?? "personal",
+    sourceToolResultId: input.sourceToolResultId ?? null,
+    lastConfirmedAt: now,
     sourceMessageId: input.sourceMessageId,
     confidence: input.confidence,
     embeddingId: null,
@@ -904,4 +1136,4 @@ function formatCalendarDateTime(value: { dateTime?: string; date?: string; timeZ
 const port = Number(process.env.API_PORT ?? 3000);
 serve({ fetch: app.fetch, port });
 
-console.log(`JARVIS API listening on http://localhost:${port}`);
+console.log(`MYLA API listening on http://localhost:${port}`);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { registerDefaultTools } from "@jarvis/tools";
+import { registerDefaultTools } from "@myla/tools";
 import { parseToolPlannerResponse, selectRelevantToolCards, validatePlannedToolCall } from "./toolPlanner.js";
 
 registerDefaultTools();
@@ -11,6 +11,14 @@ describe("tool planner", () => {
     );
 
     expect(cards.map((card) => card.name)).toContain("google.gmail.create_draft");
+  });
+
+  it("selects Gmail metadata and Drive read tools for service requests", () => {
+    const gmailCards = selectRelevantToolCards("search gmail for messages from Sam about dinner");
+    const driveCards = selectRelevantToolCards("read the Drive document about the launch plan");
+
+    expect(gmailCards.map((card) => card.name)).toContain("google.gmail.search_messages");
+    expect(driveCards.map((card) => card.name)).toContain("google.drive.read_file");
   });
 
   it("uses recent conversation context to select calendar tools for clarification answers", () => {

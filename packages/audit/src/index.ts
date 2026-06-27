@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import type { AuditEvent, AuditEventKind } from "@jarvis/shared";
-import type { JarvisDatabase } from "@jarvis/db";
-import { nowIso } from "@jarvis/db";
+import type { AuditEvent, AuditEventKind } from "@myla/shared";
+import type { MylaDatabase } from "@myla/db";
+import { nowIso } from "@myla/db";
 
 const GENESIS_HASH = "0".repeat(64);
 
@@ -20,7 +20,7 @@ export interface VerificationResult {
   actualHash?: string;
 }
 
-export async function appendAuditEvent(db: JarvisDatabase, input: AppendAuditEventInput): Promise<AuditEvent> {
+export async function appendAuditEvent(db: MylaDatabase, input: AppendAuditEventInput): Promise<AuditEvent> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       return await appendAuditEventOnce(db, input);
@@ -34,7 +34,7 @@ export async function appendAuditEvent(db: JarvisDatabase, input: AppendAuditEve
   throw new Error("Unable to append audit event.");
 }
 
-async function appendAuditEventOnce(db: JarvisDatabase, input: AppendAuditEventInput): Promise<AuditEvent> {
+async function appendAuditEventOnce(db: MylaDatabase, input: AppendAuditEventInput): Promise<AuditEvent> {
   const last = (await db.auditEvents
     .find({}, { projection: { _id: 0, seq: 1, hash: 1 } })
     .sort({ seq: -1 })
@@ -92,7 +92,7 @@ function isDuplicateKeyError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: number }).code === 11000);
 }
 
-export async function verifyAuditChain(db: JarvisDatabase): Promise<VerificationResult> {
+export async function verifyAuditChain(db: MylaDatabase): Promise<VerificationResult> {
   const rows = (await db.auditEvents
     .find({}, { projection: { _id: 0 } })
     .sort({ seq: 1 })

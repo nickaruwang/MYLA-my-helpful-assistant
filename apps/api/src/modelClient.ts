@@ -1,4 +1,4 @@
-import type { ModelRequest, ModelResponse } from "@jarvis/shared";
+import type { ModelRequest, ModelResponse } from "@myla/shared";
 
 export async function callMlWorker(request: ModelRequest): Promise<ModelResponse> {
   const baseUrl = process.env.ML_WORKER_URL ?? "http://localhost:8001";

@@ -1,5 +1,5 @@
 {
-  "name": "@jarvis/db",
+  "name": "@myla/db",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,7 @@
     "import:sqlite": "tsx src/import-sqlite.ts"
   },
   "dependencies": {
-    "@jarvis/shared": "workspace:*",
+    "@myla/shared": "workspace:*",
     "mongodb": "^7.3.0"
   },
   "devDependencies": {
