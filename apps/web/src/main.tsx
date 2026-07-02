@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   ApprovalRequest,
@@ -30,17 +30,26 @@ interface VoiceStatus {
   notes: string[];
 }
 
+interface BrowserSpeechRecognitionResult {
+  0: { transcript: string };
+  isFinal: boolean;
+}
+
 interface BrowserSpeechRecognition extends EventTarget {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
+  abort: () => void;
   start: () => void;
   stop: () => void;
-  onresult: ((event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onresult: ((event: { results: ArrayLike<BrowserSpeechRecognitionResult> }) => void) | null;
   onend: (() => void) | null;
 }
 
 function App() {
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const voiceBaseInputRef = useRef("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>(() => localStorage.getItem(SESSION_STORAGE_KEY) ?? undefined);
   const [input, setInput] = useState("");
@@ -55,6 +64,7 @@ function App() {
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>({ mode: "disabled", ready: false, notes: [] });
   const [auditStatus, setAuditStatus] = useState<string>("not checked");
   const [runStatus, setRunStatus] = useState<string>("idle");
+  const [clarificationInputs, setClarificationInputs] = useState<Record<string, string>>({});
   const [lastError, setLastError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
@@ -70,6 +80,18 @@ function App() {
     void verifyAudit();
   }, []);
 
+  useEffect(
+    () => () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.abort();
+      }
+    },
+    []
+  );
+
   useEffect(() => {
     if (!sessionId) {
       return;
@@ -83,6 +105,22 @@ function App() {
   async function sendMessage(event: React.FormEvent) {
     event.preventDefault();
     await submitMessage(input, "chat");
+  }
+
+  async function sendClarification(event: React.FormEvent, task: ToolTask) {
+    event.preventDefault();
+    const answer = clarificationInputs[task.id]?.trim();
+    if (!answer) {
+      return;
+    }
+
+    setClarificationInputs((current) => {
+      const next = { ...current };
+      delete next[task.id];
+      return next;
+    });
+    setTasks((current) => current.filter((currentTask) => currentTask.id !== task.id));
+    await submitMessage(`For the pending ${task.toolName ?? "task"}: ${answer}`, "chat");
   }
 
   async function submitMessage(message: string, inputMode: "chat" | "voice") {
@@ -133,7 +171,9 @@ function App() {
       setRunStatus(
         `Completed in ${elapsedSeconds}s. Tools: ${payload.toolResults.length}. Approvals: ${payload.approvals.length}.`
       );
-      speak(payload.message.content);
+      if (inputMode === "voice") {
+        speak(payload.message.content);
+      }
       void (async () => {
         try {
           await Promise.all([verifyAudit(), refreshSessions(), refreshMemory(), refreshTasks(payload.sessionId), refreshProviders()]);
@@ -181,24 +221,23 @@ function App() {
   }
 
   async function refreshSessions() {
-    const response = await fetch(`${API_URL}/sessions`);
-    const payload = (await response.json()) as { sessions: Session[] };
-    setSessions(payload.sessions);
+    const payload = await requestJson<{ sessions: Session[] }>(`${API_URL}/sessions`);
+    setSessions(payload.sessions ?? []);
   }
 
   async function loadMessages(nextSessionId: string) {
-    const response = await fetch(`${API_URL}/sessions/${nextSessionId}/messages`);
-    const payload = (await response.json()) as { messages: ChatMessage[] };
-    setMessages(payload.messages);
+    const payload = await requestJson<{ messages: ChatMessage[] }>(`${API_URL}/sessions/${nextSessionId}/messages`);
+    setMessages(payload.messages ?? []);
   }
 
   async function refreshApprovals() {
-    const response = await fetch(`${API_URL}/approvals`);
-    const payload = (await response.json()) as { approvals: ApprovalRequest[] };
-    setApprovals(payload.approvals);
+    const payload = await requestJson<{ approvals: ApprovalRequest[] }>(`${API_URL}/approvals`);
+    setApprovals((payload.approvals ?? []).filter((approval) => approval.status === "pending" && !isApprovalExpired(approval)));
   }
 
   async function decideApproval(approval: ApprovalRequest, decision: "approved" | "rejected") {
+    setApprovals((current) => current.filter((currentApproval) => currentApproval.id !== approval.id));
+    setLastError(undefined);
     try {
       const response = await fetch(`${API_URL}/approvals/${approval.id}/decision`, {
         method: "POST",
@@ -207,9 +246,16 @@ function App() {
       });
       const payload = (await response.json()) as { toolResult?: ToolResult; error?: string };
       if (!response.ok) {
+        if (typeof payload.error === "string" && /^Approval is already (approved|rejected|expired)\./i.test(payload.error)) {
+          setRunStatus(payload.error);
+          await refreshApprovals();
+          await refreshTasks();
+          return;
+        }
         throw new Error(payload.error ?? `Approval request failed with ${response.status}`);
       }
 
+      setApprovals((current) => current.filter((currentApproval) => currentApproval.id !== approval.id));
       const toolResult = payload.toolResult;
       if (toolResult) {
         setToolResults((current) => [toolResult, ...current]);
@@ -240,16 +286,14 @@ function App() {
   }
 
   async function refreshMemory() {
-    const response = await fetch(`${API_URL}/memory`);
-    const payload = (await response.json()) as { facts: MemoryFact[] };
-    setMemories(payload.facts);
+    const payload = await requestJson<{ facts: MemoryFact[] }>(`${API_URL}/memory`);
+    setMemories(payload.facts ?? []);
   }
 
   async function refreshTasks(nextSessionId = sessionId) {
     const url = nextSessionId ? `${API_URL}/sessions/${nextSessionId}/tasks` : `${API_URL}/tasks`;
-    const response = await fetch(url);
-    const payload = (await response.json()) as { tasks: ToolTask[] };
-    setTasks(payload.tasks);
+    const payload = await requestJson<{ tasks: ToolTask[] }>(url);
+    setTasks(payload.tasks ?? []);
   }
 
   async function saveMemory(event: React.FormEvent) {
@@ -273,45 +317,122 @@ function App() {
   }
 
   async function refreshTools() {
-    const response = await fetch(`${API_URL}/tools`);
-    const payload = (await response.json()) as { tools: PublicTool[] };
-    setTools(payload.tools);
+    const payload = await requestJson<{ tools: PublicTool[] }>(`${API_URL}/tools`);
+    setTools(payload.tools ?? []);
   }
 
   async function refreshProviders() {
-    const response = await fetch(`${API_URL}/providers`);
-    const payload = (await response.json()) as { providers: ProviderStatus[] };
-    setProviders(payload.providers);
+    const payload = await requestJson<{ providers: ProviderStatus[] }>(`${API_URL}/providers`);
+    setProviders(payload.providers ?? []);
   }
 
   async function refreshVoiceStatus() {
-    const response = await fetch(`${API_URL}/voice/status`);
-    setVoiceStatus((await response.json()) as VoiceStatus);
+    setVoiceStatus(await requestJson<VoiceStatus>(`${API_URL}/voice/status`));
   }
 
   function startVoiceInput() {
+    if (listening || busy) {
+      return;
+    }
+
     const Recognition = getSpeechRecognition();
     if (!Recognition) {
-      setInput("Voice input is not supported by this browser.");
+      const message = "Voice input is not supported by this browser. Try Chrome or Edge for dictation.";
+      setLastError(message);
+      setRunStatus("Voice input unavailable.");
       return;
     }
 
     const recognition = new Recognition();
+    let submittedTranscript = false;
+    let heardTranscript = false;
+    let recognitionFailed = false;
+    voiceBaseInputRef.current = input.trim();
+    recognitionRef.current = recognition;
     recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.interimResults = true;
     recognition.lang = "en-US";
     recognition.onresult = (event) => {
-      const transcript = event.results[0]?.[0]?.transcript ?? "";
-      void submitMessage(transcript, "voice");
+      const results = Array.from(event.results);
+      const transcript = results.map((result) => result[0]?.transcript ?? "").join(" ").trim();
+      const finalTranscript = results
+        .filter((result) => result.isFinal)
+        .map((result) => result[0]?.transcript ?? "")
+        .join(" ")
+        .trim();
+
+      if (transcript) {
+        heardTranscript = true;
+        setInput(combineVoiceInput(voiceBaseInputRef.current, transcript));
+      }
+
+      if (finalTranscript && !submittedTranscript) {
+        submittedTranscript = true;
+        recognition.stop();
+        void submitMessage(combineVoiceInput(voiceBaseInputRef.current, finalTranscript), "voice");
+      }
     };
-    recognition.onend = () => setListening(false);
-    setListening(true);
-    recognition.start();
+    recognition.onerror = (event) => {
+      recognitionFailed = true;
+      const message = speechRecognitionErrorMessage(event.error);
+      setLastError(message);
+      setRunStatus("Voice input failed.");
+      setListening(false);
+    };
+    recognition.onend = () => {
+      if (recognitionRef.current === recognition) {
+        recognitionRef.current = null;
+      }
+      voiceBaseInputRef.current = "";
+      setListening(false);
+      if (!recognitionFailed && !submittedTranscript && !heardTranscript) {
+        setRunStatus("Voice input ended without a transcript.");
+      }
+    };
+
+    try {
+      setListening(true);
+      setLastError(undefined);
+      setRunStatus("Listening...");
+      recognition.start();
+    } catch (error) {
+      recognitionRef.current = null;
+      voiceBaseInputRef.current = "";
+      setListening(false);
+      const message = error instanceof Error ? error.message : "Voice input could not start.";
+      setLastError(message);
+      setRunStatus("Voice input failed.");
+    }
+  }
+
+  function stopVoiceInput() {
+    if (!recognitionRef.current) {
+      return;
+    }
+
+    setRunStatus("Finishing voice input...");
+    recognitionRef.current.stop();
+  }
+
+  function cancelVoiceInput() {
+    if (!recognitionRef.current) {
+      return;
+    }
+
+    const baseInput = voiceBaseInputRef.current;
+    recognitionRef.current.onresult = null;
+    recognitionRef.current.onerror = null;
+    recognitionRef.current.onend = null;
+    recognitionRef.current.abort();
+    recognitionRef.current = null;
+    voiceBaseInputRef.current = "";
+    setInput(baseInput);
+    setListening(false);
+    setRunStatus("Voice input cancelled.");
   }
 
   async function verifyAudit() {
-    const response = await fetch(`${API_URL}/audit/verify`);
-    const payload = (await response.json()) as { ok: boolean; checked: number };
+    const payload = await requestJson<{ ok: boolean; checked: number }>(`${API_URL}/audit/verify`);
     setAuditStatus(payload.ok ? `verified ${payload.checked} events` : "verification failed");
   }
 
@@ -324,6 +445,9 @@ function App() {
     setToolResults([]);
     setTasks([]);
   }
+
+  const visibleTasks = tasks.filter(shouldDisplayTask);
+  const voiceInputSupported = Boolean(getSpeechRecognition());
 
   return (
     <main className="shell">
@@ -375,7 +499,8 @@ function App() {
                   className={session.id === sessionId ? "secondary selected" : "secondary"}
                   onClick={() => setSessionId(session.id)}
                 >
-                  {session.title ?? session.id.slice(0, 8)}
+                  <span className="session-title">{session.title ?? "Untitled conversation"}</span>
+                  <small>{formatSessionDate(session.updatedAt)}</small>
                 </button>
               ))}
             </div>
@@ -385,9 +510,7 @@ function App() {
             <p className="eyebrow">Hands free</p>
             <h2>Voice</h2>
             <p className="muted">Worker mode: {voiceStatus.mode} ({voiceStatus.ready ? "ready" : "not ready"})</p>
-            <button type="button" onClick={startVoiceInput} disabled={busy || listening}>
-              {listening ? "MYLA is listening..." : "Push to talk"}
-            </button>
+            <p className="muted">Use Dictate in the chat box for browser voice-to-text.</p>
             {voiceStatus.notes.slice(0, 2).map((note) => <p key={note} className="muted">{note}</p>)}
           </section>
         </aside>
@@ -421,15 +544,40 @@ function App() {
               ))
             )}
           </div>
-          <form onSubmit={sendMessage}>
+          <form className="chat-composer" onSubmit={sendMessage}>
             <input
               value={input}
               onChange={(event) => setInput(event.target.value)}
               disabled={busy}
               placeholder="Ask MYLA to plan, remember, search, or take an approved action..."
             />
-            <button disabled={busy}>{busy ? "Thinking..." : "Send"}</button>
+            <div className="composer-actions">
+              <button
+                type="button"
+                className={[
+                  "voice-button",
+                  listening ? "listening" : "",
+                  voiceInputSupported ? "" : "unsupported"
+                ].filter(Boolean).join(" ")}
+                aria-pressed={listening}
+                onClick={listening ? stopVoiceInput : startVoiceInput}
+                disabled={busy}
+              >
+                {listening ? "Stop" : "Dictate"}
+              </button>
+              {listening ? (
+                <button type="button" className="secondary voice-cancel" onClick={cancelVoiceInput}>
+                  Cancel
+                </button>
+              ) : null}
+              <button disabled={busy || listening}>{busy ? "Thinking..." : "Send"}</button>
+            </div>
           </form>
+          {listening ? (
+            <p className="composer-hint active">Listening now. Speak naturally, then pause or press Stop.</p>
+          ) : !voiceInputSupported ? (
+            <p className="composer-hint">Voice dictation works best in Chrome or Edge through the Web Speech API.</p>
+          ) : null}
         </div>
 
         <aside className="stack context-rail">
@@ -469,10 +617,24 @@ function App() {
           <section className="panel">
             <p className="eyebrow">What MYLA is doing</p>
             <h2>Activity</h2>
-            {tasks.length === 0 ? (
+            {visibleTasks.length === 0 ? (
               <p className="muted">Tool activity will appear here when MYLA takes action.</p>
             ) : (
-              tasks.slice(0, 8).map((task) => <TaskCard key={task.id} task={task} />)
+              visibleTasks.slice(0, 8).map((task) => (
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  clarificationValue={clarificationInputs[task.id] ?? ""}
+                  busy={busy}
+                  onClarificationChange={(value) =>
+                    setClarificationInputs((current) => ({
+                      ...current,
+                      [task.id]: value
+                    }))
+                  }
+                  onClarificationSubmit={(event) => void sendClarification(event, task)}
+                />
+              ))
             )}
             {toolResults.length > 0 ? (
               <details className="approval-preview">
@@ -564,6 +726,26 @@ function getSpeechRecognition(): (new () => BrowserSpeechRecognition) | undefine
   return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition;
 }
 
+function combineVoiceInput(baseInput: string, transcript: string) {
+  return [baseInput.trim(), transcript.trim()].filter(Boolean).join(" ");
+}
+
+function speechRecognitionErrorMessage(error?: string) {
+  switch (error) {
+    case "not-allowed":
+    case "service-not-allowed":
+      return "Microphone access was blocked. Allow microphone access to dictate to MYLA.";
+    case "no-speech":
+      return "MYLA did not hear anything. Try dictating again.";
+    case "audio-capture":
+      return "No microphone was found for voice input.";
+    case "network":
+      return "Voice recognition could not reach the browser speech service.";
+    default:
+      return "Voice input failed. Try again or type your message.";
+  }
+}
+
 function speak(text: string) {
   if (!("speechSynthesis" in window)) {
     return;
@@ -588,13 +770,113 @@ function dedupeMemories(memories: MemoryFact[]): MemoryFact[] {
   return [...new Map(memories.map((memory) => [memory.id, memory])).values()];
 }
 
-function TaskCard({ task }: { task: ToolTask }) {
+function formatSessionDate(value: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
+function clarificationPlaceholder(task: ToolTask): string {
+  if (task.missingFields.length === 0) {
+    return "Type your answer...";
+  }
+
+  return `Type ${humanReadableList(task.missingFields.map(humanizeKey).map((field) => field.toLowerCase()))}...`;
+}
+
+function shouldDisplayTask(task: ToolTask): boolean {
+  if (task.status === "cancelled" || task.status === "expired") {
+    return false;
+  }
+
+  return true;
+}
+
+function taskClarificationQuestion(task: ToolTask): string {
+  const storedQuestion = [task.resultNotification, ...task.validationErrors].find((value) => isUsefulClarificationQuestion(value));
+  if (storedQuestion) {
+    return storedQuestion;
+  }
+
+  if (task.missingFields.length > 0) {
+    return `What ${humanReadableList(task.missingFields.map(humanizeKey).map((field) => field.toLowerCase()))} should MYLA use?`;
+  }
+
+  if (Object.keys(task.draftArgs).length > 0) {
+    return "What detail should MYLA add or change before continuing?";
+  }
+
+  return "What information should MYLA use to continue?";
+}
+
+function isUsefulClarificationQuestion(value: string | null | undefined): value is string {
+  if (!value?.trim()) {
+    return false;
+  }
+
+  return !/^request failed/i.test(value);
+}
+
+function humanReadableList(values: string[]): string {
+  if (values.length <= 1) {
+    return values[0] ?? "detail";
+  }
+
+  if (values.length === 2) {
+    return `${values[0]} and ${values[1]}`;
+  }
+
+  return `${values.slice(0, -1).join(", ")}, and ${values.at(-1)}`;
+}
+
+function TaskCard({
+  task,
+  clarificationValue,
+  busy,
+  onClarificationChange,
+  onClarificationSubmit
+}: {
+  task: ToolTask;
+  clarificationValue: string;
+  busy: boolean;
+  onClarificationChange: (value: string) => void;
+  onClarificationSubmit: (event: React.FormEvent) => void;
+}) {
+  const needsClarification = task.status === "needs_clarification";
+  const clarificationQuestion = taskClarificationQuestion(task);
+
   return (
-    <div className="notice">
+    <div className={needsClarification ? "notice clarification-task" : "notice"}>
       <strong>{task.toolName ?? "External action"} · {humanizeKey(task.status)}</strong>
-      {task.resultNotification ? <p>{task.resultNotification}</p> : null}
+      {needsClarification ? (
+        <div className="clarification-question">
+          <span>MYLA is asking</span>
+          <p>{clarificationQuestion}</p>
+        </div>
+      ) : task.resultNotification ? (
+        <p>{task.resultNotification}</p>
+      ) : null}
       {task.missingFields.length > 0 ? <p className="muted">Missing: {task.missingFields.join(", ")}</p> : null}
       {task.assumptions.length > 0 ? <p className="muted">Assumptions: {task.assumptions.join("; ")}</p> : null}
+      {needsClarification ? (
+        <form className="clarification-form" onSubmit={onClarificationSubmit}>
+          <label>
+            <span>Answer MYLA here</span>
+            <input
+              value={clarificationValue}
+              onChange={(event) => onClarificationChange(event.target.value)}
+              disabled={busy}
+              placeholder={clarificationPlaceholder(task)}
+            />
+          </label>
+          <button type="submit" disabled={busy || !clarificationValue.trim()}>
+            Continue
+          </button>
+        </form>
+      ) : null}
       <details className="approval-preview">
         <summary>Task Details</summary>
         <dl className="tool-details">
@@ -745,6 +1027,19 @@ function toolResultDetails(result: ToolResult): Array<[string, string]> {
   return details;
 }
 
+async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
+  const payload = (await response.json().catch(async () => ({
+    error: await response.text()
+  }))) as unknown;
+
+  if (!response.ok) {
+    throw new Error(formatApiError(payload, response.status));
+  }
+
+  return payload as T;
+}
+
 function actorLabel(actor: ChatMessage["actor"]): string {
   if (actor === "assistant") {
     return "MYLA";
@@ -756,7 +1051,12 @@ function actorLabel(actor: ChatMessage["actor"]): string {
 }
 
 function humanizeKey(value: string): string {
-  return value.replace(/([A-Z])/g, " $1").replace(/^./, (first) => first.toUpperCase());
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/([A-Z])/g, " $1")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^./, (first) => first.toUpperCase());
 }
 
 function formatApiError(payload: unknown, status: number): string {

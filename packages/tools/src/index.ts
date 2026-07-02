@@ -2,6 +2,7 @@ import type { ApprovalMode, ApprovalRequest, ProviderStatus, RiskLevel, ToolCall
 import { z } from "zod";
 import { createSafeGoogleTools } from "./google.js";
 import { createFinanceTools } from "./finance.js";
+import { createPushcutTools } from "./pushcut.js";
 import { createSearchTools } from "./search.js";
 import { createTeslaTools } from "./tesla.js";
 
@@ -260,6 +261,10 @@ export function registerDefaultTools(): void {
   }
 
   for (const tool of createFinanceTools()) {
+    registerTool(tool);
+  }
+
+  for (const tool of createPushcutTools()) {
     registerTool(tool);
   }
 }

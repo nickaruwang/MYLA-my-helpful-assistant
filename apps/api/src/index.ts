@@ -19,12 +19,13 @@ import {
   searchMemoryFacts,
   storeApproval,
   storeMemoryFact,
-  storePlannerTrace,
   storeMessage,
-  storeToolProposal,
   createToolTask,
+  updateAgentRun,
   updateApprovalStatus,
   updateToolProposalStatus,
+  updateSessionTitleIfEmpty,
+  updateToolTask,
   updateToolTaskByProposalId
 } from "@myla/db";
 import { classifyIntent } from "@myla/policy";
@@ -50,7 +51,7 @@ import {
   saveGoogleTokensFromCode
 } from "@myla/tools";
 import { callMlWorker, embedText } from "./modelClient.js";
-import { planToolCall } from "./toolPlanner.js";
+import { rejectAgentRunApproval, resumeAgentRunAfterApproval, startAgentRun } from "./agentRunner.js";
 
 const app = new Hono();
 const db = await openDatabase();
@@ -209,8 +210,15 @@ app.post("/approvals/:approvalId/decision", async (c) => {
       resultStatus: "blocked",
       resultNotification: `Rejected: ${proposal.dryRunSummary}`
     });
+    const agentRun = await rejectAgentRunApproval({
+      db,
+      approval,
+      proposal,
+      reason: parsed.data.reason
+    });
     return c.json({
       approval: { ...approval, status: "rejected", decidedAt: now },
+      agentRun,
       toolResult: {
         proposalId: proposal.id,
         toolName: proposal.toolName,
@@ -240,9 +248,51 @@ app.post("/approvals/:approvalId/decision", async (c) => {
     }
   });
 
+  const resumePolicy = classifyIntent({ text: proposal.dryRunSummary });
+  const resumeMessages = await listMessages(db, proposal.sessionId, 10);
+  const resumed = await resumeAgentRunAfterApproval({
+    db,
+    approval: { ...approval, status: "approved", decidedAt: now },
+    proposal,
+    toolResult,
+    privacyClass: resumePolicy.privacyClass,
+    route: resumePolicy.modelRoute,
+    conversationContext: resumeMessages.slice(-8).map((message) => ({
+      actor: message.actor,
+      content: message.content,
+      createdAt: message.createdAt
+    }))
+  });
+  let message: ChatMessage | undefined;
+  if (resumed?.finalMessage) {
+    message = await storeMessage(db, {
+      sessionId: proposal.sessionId,
+      actor: "assistant",
+      content: resumed.finalMessage,
+      correlationId: proposal.correlationId
+    });
+    await updateAgentRun(db, resumed.run.id, { outputMessageId: message.id });
+    await appendAuditEvent(db, {
+      actor: "system",
+      kind: "model.completed",
+      correlationId: proposal.correlationId,
+      payload: {
+        model: `agent-${resumed.status}`,
+        route: "local",
+        toolResultCount: resumed.toolResults.length
+      }
+    });
+  }
+  const storedMemories = resumed
+    ? await maybeStoreMemoryFromToolResults(resumed.toolResults, proposal.correlationId)
+    : await maybeStoreMemoryFromToolResults([toolResult], proposal.correlationId);
+
   return c.json({
     approval: { ...approval, status: "approved", decidedAt: now },
-    toolResult
+    toolResult,
+    resumed,
+    message,
+    storedMemories
   });
 });
 
@@ -343,6 +393,7 @@ app.post("/chat", async (c) => {
     content: parsed.data.message,
     correlationId
   });
+  await updateSessionTitleIfEmpty(db, sessionId, summarizeSessionTitle(parsed.data.message));
 
   await appendAuditEvent(db, {
     actor: "system",
@@ -365,224 +416,38 @@ app.post("/chat", async (c) => {
       createdAt: activeTask.updatedAt
     });
   }
-  const toolResults: ToolResult[] = [];
-  const approvals: ApprovalRequest[] = [];
-  const tasks: ToolTask[] = [];
-  const toolPlanning = await planToolCall({
-    message: parsed.data.message,
+  const isClarificationAnswer =
+    activeTask?.status === "needs_clarification" && /^For the pending .+?:\s+/i.test(parsed.data.message);
+
+  if (isClarificationAnswer) {
+    await updateToolTask(db, activeTask.id, {
+      status: "cancelled",
+      missingFields: [],
+      resultNotification: "Clarification answered; MYLA continued with the updated details."
+    });
+  }
+
+  const agentResult = await startAgentRun({
+    db,
     sessionId,
     correlationId,
+    goal: parsed.data.message,
+    inputMessageId: userMessage.id,
     privacyClass: policy.privacyClass,
     route: policy.modelRoute,
     preferredModel: parsed.data.preferredModel,
     conversationContext
   });
-
-  if (toolPlanning.trace) {
-    await storePlannerTrace(db, {
-      id: crypto.randomUUID(),
-      sessionId,
-      correlationId,
-      selectedToolNames: toolPlanning.trace.selectedToolNames,
-      rawModelResponse: toolPlanning.trace.rawModelResponse,
-      plannerResult: toolPlanning.trace.plannerResult,
-      fallbackReason: toolPlanning.trace.fallbackReason,
-      validationErrors: toolPlanning.trace.validationErrors,
-      createdAt: nowIso()
-    });
-  }
-
-  if (toolPlanning.kind === "clarification") {
-    const task = await createToolTask(db, {
-      sessionId,
-      correlationId,
-      toolName: toolPlanning.plan?.toolName,
-      status: "needs_clarification",
-      draftArgs: toolPlanning.plan?.args,
-      missingFields: toolPlanning.plan?.missingFields,
-      assumptions: toolPlanning.plan?.assumptions,
-      validationErrors: toolPlanning.trace?.validationErrors ?? [toolPlanning.message],
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-    });
-    tasks.push(task);
-
-    const assistantMessage = await storeMessage(db, {
-      sessionId,
-      actor: "assistant",
-      content: toolPlanning.message,
-      correlationId
-    });
-
-    await appendAuditEvent(db, {
-      actor: "system",
-      kind: "model.completed",
-      correlationId,
-      payload: {
-        model: "tool-planner",
-        route: "local",
-        toolResultCount: 0,
-        clarification: true
-      }
-    });
-
-    return c.json({
-      sessionId,
-      correlationId,
-      message: assistantMessage,
-      toolResults,
-      approvals,
-      tasks,
-      providerStatuses: listProviderStatuses(),
-      memories: [],
-      storedMemories: []
-    });
-  }
-
-  const plannedTool =
-    toolPlanning.kind === "tool"
-      ? {
-          toolName: toolPlanning.plan.toolName,
-          args: toolPlanning.plan.args,
-          assumptions: toolPlanning.plan.assumptions,
-          plannedBy: toolPlanning.plannedBy
-        }
-      : undefined;
-
-  if (plannedTool) {
-    const decision = await proposeAndMaybeExecuteTool({
-      sessionId,
-      correlationId,
-      toolName: plannedTool.toolName,
-      args: plannedTool.args,
-      assumptions: plannedTool.assumptions,
-      plannedBy: plannedTool.plannedBy
-    });
-
-    await storeToolProposal(db, decision.proposal);
-    const task = await createToolTask(db, {
-      sessionId,
-      correlationId,
-      toolName: decision.proposal.toolName,
-      status: taskStatusForToolResult(decision.result),
-      draftArgs: decision.proposal.args,
-      assumptions: decision.proposal.assumptions,
-      proposalId: decision.proposal.id,
-      approvalId: decision.approval?.id,
-      resultStatus: decision.result.status,
-      resultNotification: decision.result.notification,
-      expiresAt: decision.approval?.expiresAt ?? null
-    });
-    tasks.push(task);
-    if (decision.result.status === "executed" || decision.result.status === "failed" || decision.result.status === "blocked") {
-      await updateToolProposalStatus(db, decision.proposal.id, proposalStatusForToolResult(decision.result), { executedAt: nowIso() });
-    }
-    await appendAuditEvent(db, {
-      actor: "system",
-      kind: "tool.proposed",
-      correlationId,
-      payload: {
-        proposalId: decision.proposal.id,
-        toolName: decision.proposal.toolName,
-        riskLevel: decision.proposal.riskLevel,
-        approvalMode: decision.proposal.approvalMode,
-        plannedBy: decision.proposal.plannedBy,
-        assumptions: decision.proposal.assumptions
-      }
-    });
-
-    if (decision.approval) {
-      await storeApproval(db, decision.approval);
-      approvals.push({ ...decision.approval, proposal: decision.proposal });
-      await appendAuditEvent(db, {
-        actor: "system",
-        kind: "approval.created",
-        correlationId,
-        payload: { approvalId: decision.approval.id, proposalId: decision.proposal.id }
-      });
-    }
-
-    toolResults.push(decision.result);
-    await appendAuditEvent(db, {
-      actor: "tool",
-      kind: decision.result.status === "executed" ? "tool.executed" : "tool.policy_decision",
-      correlationId,
-      payload: {
-        proposalId: decision.proposal.id,
-        status: decision.result.status,
-        notification: decision.result.notification
-      }
-    });
-
-    const sendDraftDecision = await maybeQueueGmailSendApproval({
-      sessionId,
-      correlationId,
-      result: decision.result
-    });
-    if (sendDraftDecision) {
-      await storeToolProposal(db, sendDraftDecision.proposal);
-      const sendTask = await createToolTask(db, {
-        sessionId,
-        correlationId,
-        toolName: sendDraftDecision.proposal.toolName,
-        status: taskStatusForToolResult(sendDraftDecision.result),
-        draftArgs: sendDraftDecision.proposal.args,
-        assumptions: sendDraftDecision.proposal.assumptions,
-        proposalId: sendDraftDecision.proposal.id,
-        approvalId: sendDraftDecision.approval?.id,
-        resultStatus: sendDraftDecision.result.status,
-        resultNotification: sendDraftDecision.result.notification,
-        expiresAt: sendDraftDecision.approval?.expiresAt ?? null
-      });
-      tasks.push(sendTask);
-      await appendAuditEvent(db, {
-        actor: "system",
-        kind: "tool.proposed",
-        correlationId,
-        payload: {
-          proposalId: sendDraftDecision.proposal.id,
-          toolName: sendDraftDecision.proposal.toolName,
-          riskLevel: sendDraftDecision.proposal.riskLevel,
-          approvalMode: sendDraftDecision.proposal.approvalMode,
-          plannedBy: sendDraftDecision.proposal.plannedBy,
-          assumptions: sendDraftDecision.proposal.assumptions
-        }
-      });
-
-      if (sendDraftDecision.approval) {
-        await storeApproval(db, sendDraftDecision.approval);
-        approvals.push({ ...sendDraftDecision.approval, proposal: sendDraftDecision.proposal });
-        await appendAuditEvent(db, {
-          actor: "system",
-          kind: "approval.created",
-          correlationId,
-          payload: {
-            approvalId: sendDraftDecision.approval.id,
-            proposalId: sendDraftDecision.proposal.id,
-            followUpFor: decision.proposal.id
-          }
-        });
-      }
-
-      toolResults.push(sendDraftDecision.result);
-      await appendAuditEvent(db, {
-        actor: "tool",
-        kind: "tool.policy_decision",
-        correlationId,
-        payload: {
-          proposalId: sendDraftDecision.proposal.id,
-          status: sendDraftDecision.result.status,
-          notification: sendDraftDecision.result.notification
-        }
-      });
-    }
-  }
+  const toolResults = agentResult.toolResults;
+  const approvals = agentResult.approvals;
+  const tasks = agentResult.tasks;
 
   const directToolResponse = buildDirectToolResponse(toolResults);
   let memories: Awaited<ReturnType<typeof searchMemoryFacts>> = [];
-  let assistantText = directToolResponse;
-  let assistantSource = directToolResponse ? "direct-tool-response" : undefined;
+  let assistantText = agentResult.finalMessage ?? directToolResponse;
+  let assistantSource = agentResult.finalMessage ? `agent-${agentResult.status}` : directToolResponse ? "direct-tool-response" : undefined;
 
-  if (!assistantText && toolPlanning.kind === "none") {
+  if (!assistantText && agentResult.status === "none") {
     assistantText = buildNoToolActionResponse(parsed.data.message, conversationContext);
     assistantSource = assistantText ? "action-guard" : undefined;
     if (assistantText) {
@@ -592,7 +457,7 @@ app.post("/chat", async (c) => {
           correlationId,
           toolName: null,
           status: "blocked",
-          validationErrors: [toolPlanning.reason],
+          validationErrors: [agentResult.noneReason ?? "No matching agent step."],
           resultStatus: "blocked",
           resultNotification: assistantText
         })
@@ -647,6 +512,7 @@ app.post("/chat", async (c) => {
     content: assistantText,
     correlationId
   });
+  await updateAgentRun(db, agentResult.run.id, { outputMessageId: assistantMessage.id });
 
   const storedMemories = [
     ...(await maybeStoreMemoryFromToolResults(toolResults, correlationId)),
@@ -768,6 +634,40 @@ function taskStatusForToolResult(result: ToolResult): ToolTask["status"] {
   return "failed";
 }
 
+function summarizeSessionTitle(message: string): string {
+  const cleaned = message
+    .replace(/\s+/g, " ")
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .trim()
+    .replace(/[?.!,;:]+$/g, "");
+
+  if (!cleaned) {
+    return "New conversation";
+  }
+
+  const withoutAssistantName = cleaned.replace(/^(?:hey|hi|hello)?\s*(?:myla|assistant)[,\s]+/i, "").trim() || cleaned;
+  const core =
+    withoutAssistantName.match(
+      /^(?:can you|could you|please|pls|would you|i need you to|help me|tell me|show me|find|search|check|what do i|what's|what is)\s+(.+)$/i
+    )?.[1] ?? withoutAssistantName;
+  const compact = core
+    .replace(/\b(?:for me|please|pls)\b/gi, "")
+    .replace(/\b(?:the|a|an)\b\s+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const title = compact.length > 42 ? `${compact.slice(0, 39).trimEnd()}...` : compact;
+
+  return title
+    .split(" ")
+    .map((word) => (word.length <= 3 && word === word.toLowerCase() ? word : word[0]?.toUpperCase() + word.slice(1)))
+    .join(" ");
+}
+
+function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
 function proposalStatusForToolResult(result: ToolResult) {
   if (result.status === "executed") {
     return "executed" as const;
@@ -795,7 +695,9 @@ function isLikelyExternalActionRequest(message: string, context: Array<{ actor: 
   const combined = [message, ...context.map((entry) => entry.content)].join("\n");
   const directAction =
     /\b(add|create|book|schedule|send|delete|remove|pay|transfer|buy|sell|text|message)\b/i.test(message) &&
-    /\b(calendar|event|meeting|gmail|email|draft|tesla|vehicle|bank|payment|transaction)\b/i.test(combined);
+    /\b(calendar|event|meeting|gmail|email|draft|tesla|vehicle|bank|payment|transaction|pushcut|shortcut|iphone|imessage|sms)\b/i.test(
+      combined
+    );
   if (directAction) {
     return true;
   }
@@ -809,7 +711,9 @@ function isLikelyExternalActionRequest(message: string, context: Array<{ actor: 
     (entry) =>
       entry.actor === "user" &&
       /\b(add|create|book|schedule|send|delete|remove|pay|transfer|buy|sell|text|message)\b/i.test(entry.content) &&
-      /\b(calendar|event|meeting|gmail|email|draft|tesla|vehicle|bank|payment|transaction)\b/i.test(entry.content)
+      /\b(calendar|event|meeting|gmail|email|draft|tesla|vehicle|bank|payment|transaction|pushcut|shortcut|iphone|imessage|sms)\b/i.test(
+        entry.content
+      )
   );
   const currentLooksLikeClarificationAnswer =
     /\b(today|tomorrow|tmrw|monday|tuesday|wednesday|thursday|friday|saturday|sunday|am|pm|noon|\d{1,2}(?::\d{2})?)\b/i.test(

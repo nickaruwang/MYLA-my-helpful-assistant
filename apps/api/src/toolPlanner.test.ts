@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerDefaultTools } from "@myla/tools";
-import { parseToolPlannerResponse, selectRelevantToolCards, validatePlannedToolCall } from "./toolPlanner.js";
+import {
+  parseAgentPlannerResponse,
+  parseToolPlannerResponse,
+  selectRelevantToolCards,
+  validateAgentNextStep,
+  validatePlannedToolCall
+} from "./toolPlanner.js";
 
 registerDefaultTools();
 
@@ -34,6 +40,26 @@ describe("tool planner", () => {
     ]);
 
     expect(cards.map((card) => card.name)).toContain("google.calendar.create_event");
+  });
+
+  it("selects Pushcut tools for configured car lock requests", () => {
+    process.env.PUSHCUT_API_KEY = "test-token";
+    process.env.PUSHCUT_SHORTCUTS_JSON = JSON.stringify([
+      {
+        name: "lock car",
+        notification: "Lock Car",
+        parameters: [],
+        bodyMode: "none"
+      }
+    ]);
+    registerDefaultTools();
+
+    const cards = selectRelevantToolCards("lock the car");
+
+    expect(cards.map((card) => card.name)).toContain("pushcut.lock_car");
+
+    delete process.env.PUSHCUT_API_KEY;
+    delete process.env.PUSHCUT_SHORTCUTS_JSON;
   });
 
   it("validates a dinner email draft plan", () => {
@@ -107,6 +133,44 @@ describe("tool planner", () => {
     expect(result.kind).toBe("clarification");
     if (result.kind === "clarification") {
       expect(result.message).toContain("Who should I address");
+    }
+  });
+
+  it("parses and validates agent final and clarification next steps", () => {
+    const finalStep = parseAgentPlannerResponse(JSON.stringify({ kind: "final", message: "Done." }));
+    const clarificationStep = parseAgentPlannerResponse(
+      JSON.stringify({ kind: "clarification", message: "Who should I text?", missingFields: ["recipient"] })
+    );
+
+    expect(finalStep).toBeDefined();
+    expect(clarificationStep).toBeDefined();
+    expect(validateAgentNextStep(finalStep!).kind).toBe("final");
+    const validatedClarification = validateAgentNextStep(clarificationStep!);
+    expect(validatedClarification.kind).toBe("clarification");
+    if (validatedClarification.kind === "clarification") {
+      expect(validatedClarification.missingFields).toContain("recipient");
+    }
+  });
+
+  it("parses an agent tool next step through existing tool validation", () => {
+    const step = parseAgentPlannerResponse(
+      JSON.stringify({
+        kind: "tool",
+        toolName: "search.web",
+        args: { query: "latest local llm news", count: 3 },
+        confidence: 0.8,
+        assumptions: [],
+        missingFields: [],
+        needsClarification: false
+      })
+    );
+
+    expect(step).toBeDefined();
+    const result = validateAgentNextStep(step!);
+    expect(result.kind).toBe("tool");
+    if (result.kind === "tool") {
+      expect(result.plan.toolName).toBe("search.web");
+      expect(result.plan.args.query).toBe("latest local llm news");
     }
   });
 

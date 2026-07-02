@@ -70,6 +70,7 @@ The app requests Calendar read/events, Drive metadata read, and Gmail compose. C
 - Search: set `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, or `SEARXNG_URL`.
 - Tesla: complete Tesla Fleet API OAuth, then set `TESLA_ACCESS_TOKEN` and `TESLA_VEHICLE_ID`. Commands stay manual and are disabled unless `TESLA_COMMANDS_ENABLED=true`.
 - Finance: use Plaid Link to create a read-only access token, then set `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ACCESS_TOKEN`, and `PLAID_ENV`.
+- Pushcut: set `PUSHCUT_SECRET` from the notification webhook URL and list shortcut tools in `PUSHCUT_SHORTCUTS_FILE` (or inline `PUSHCUT_SHORTCUTS_JSON`). Each entry becomes a manual approval tool, for example `pushcut.send_imessage` can POST to `https://api.pushcut.io/<secret>/notifications/send%20msg%20test`.
 
 ## Import Prototype SQLite Data
 

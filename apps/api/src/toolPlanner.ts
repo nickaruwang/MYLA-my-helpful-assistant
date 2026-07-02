@@ -27,6 +27,29 @@ const PlannedToolCallSchema = z.object({
 
 export type PlannedToolCall = z.infer<typeof PlannedToolCallSchema>;
 
+const AgentFinalStepSchema = z.object({
+  kind: z.literal("final"),
+  message: z.string().min(1)
+});
+
+const AgentClarificationStepSchema = z.object({
+  kind: z.literal("clarification"),
+  message: z.string().min(1),
+  missingFields: z.array(z.string()).default([])
+});
+
+const AgentToolStepSchema = PlannedToolCallSchema.extend({
+  kind: z.literal("tool").default("tool")
+});
+
+export interface AgentToolObservation {
+  stepIndex: number;
+  toolName: string;
+  status: string;
+  notification: string;
+  data?: unknown;
+}
+
 export interface ToolPlanningTrace {
   selectedToolNames: string[];
   rawModelResponse: string | null;
@@ -45,6 +68,28 @@ export type ToolPlanningResult = (
       kind: "clarification";
       message: string;
       plan?: PlannedToolCall;
+    }
+  | {
+      kind: "none";
+      reason: string;
+    }
+) & { trace?: ToolPlanningTrace };
+
+export type AgentNextStepPlanningResult = (
+  | {
+      kind: "tool";
+      plan: PlannedToolCall;
+      plannedBy: "model" | "fallback";
+    }
+  | {
+      kind: "clarification";
+      message: string;
+      missingFields?: string[];
+      plan?: PlannedToolCall;
+    }
+  | {
+      kind: "final";
+      message: string;
     }
   | {
       kind: "none";
@@ -91,7 +136,7 @@ export async function planToolCall(input: {
       conversationContext: input.conversationContext
     });
     if (validated.kind === "tool") {
-      return attachTrace({ ...validated, plannedBy: "model" }, {
+      return attachTrace({ ...validated, plannedBy: "model" as const }, {
         selectedToolNames,
         rawModelResponse: modelResponse.text,
         plannerResult: "tool",
@@ -132,6 +177,77 @@ export async function planToolCall(input: {
   });
 }
 
+export async function planAgentNextStep(input: {
+  goal: string;
+  sessionId: string;
+  correlationId: string;
+  privacyClass: PrivacyClass;
+  route: ModelRoute;
+  preferredModel?: string;
+  conversationContext?: PlannerConversationMessage[];
+  observations?: AgentToolObservation[];
+  remainingSteps: number;
+  remainingToolCalls: number;
+}): Promise<AgentNextStepPlanningResult> {
+  const observations = input.observations ?? [];
+  const toolCards = selectRelevantToolCards(
+    [input.goal, ...observations.map((observation) => `${observation.toolName}: ${observation.notification}`)].join("\n"),
+    input.conversationContext
+  );
+  const selectedToolNames = toolCards.map((card) => card.name);
+  if (toolCards.length === 0) {
+    const fallback = observations.length > 0 ? finalFromObservations(observations) : fallbackPlanning(input.goal);
+    return attachTrace(fallback, {
+      selectedToolNames,
+      rawModelResponse: null,
+      plannerResult: fallback.kind,
+      fallbackReason: fallback.kind === "none" ? fallback.reason : "No relevant tool cards selected.",
+      validationErrors: []
+    });
+  }
+
+  const modelResponse = await callMlWorker({
+    prompt: buildAgentPlannerPrompt(input.goal, toolCards, {
+      conversationContext: input.conversationContext,
+      observations,
+      remainingSteps: input.remainingSteps,
+      remainingToolCalls: input.remainingToolCalls
+    }),
+    sessionId: input.sessionId,
+    correlationId: input.correlationId,
+    retrievedContext: [],
+    privacyClass: input.privacyClass,
+    route: input.route,
+    preferredModel: input.preferredModel
+  });
+
+  const parsed = parseAgentPlannerResponse(modelResponse.text);
+  if (parsed) {
+    const validated = validateAgentNextStep(parsed, {
+      message: input.goal,
+      conversationContext: input.conversationContext
+    });
+    if (validated.kind !== "none") {
+      return attachTrace(validated, {
+        selectedToolNames,
+        rawModelResponse: modelResponse.text,
+        plannerResult: validated.kind,
+        fallbackReason: null,
+        validationErrors: validated.kind === "clarification" ? [validated.message] : []
+      });
+    }
+  }
+
+  const fallback = observations.length > 0 ? finalFromObservations(observations) : fallbackPlanning(input.goal);
+  return attachTrace(fallback, {
+    selectedToolNames,
+    rawModelResponse: modelResponse.text,
+    plannerResult: fallback.kind,
+    fallbackReason: parsed ? "Parsed agent step did not validate." : "Model response did not contain parseable agent step JSON.",
+    validationErrors: []
+  });
+}
+
 export function selectRelevantToolCards(message: string, conversationContext: PlannerConversationMessage[] = []): ModelToolCard[] {
   const cards = listModelToolCards();
   const lower = [message, ...conversationContext.map((entry) => entry.content)].join("\n").toLowerCase();
@@ -144,7 +260,9 @@ export function selectRelevantToolCards(message: string, conversationContext: Pl
       (/\b(drive|file|doc|document|summarize|read)\b/.test(lower) && haystack.includes("drive")) ||
       (/\b(search|web|internet|latest|look up)\b/.test(lower) && haystack.includes("search")) ||
       (/\b(tesla|car|vehicle)\b/.test(lower) && haystack.includes("tesla")) ||
-      (/\b(bank|finance|spending|transaction|portfolio|robinhood)\b/.test(lower) && haystack.includes("plaid"))
+      (/\b(bank|finance|spending|transaction|portfolio|robinhood)\b/.test(lower) && haystack.includes("plaid")) ||
+      (/\b(pushcut|shortcut|shortcuts|iphone|ios|imessage|sms|text|tesla|car|vehicle|lock|unlock)\b/.test(lower) &&
+        haystack.includes("pushcut"))
     );
   });
 
@@ -184,6 +302,9 @@ function relevanceScore(card: ModelToolCard, lower: string): number {
   if (/\b(search|find)\b/.test(lower) && card.name.includes("search")) {
     score += 6;
   }
+  if (/\b(pushcut|shortcut|shortcuts|iphone|ios|imessage|sms|text|tesla|car|vehicle|lock|unlock)\b/.test(lower) && card.name.includes("pushcut")) {
+    score += 8;
+  }
   return score;
 }
 
@@ -197,6 +318,35 @@ export function parseToolPlannerResponse(text: string): PlannedToolCall | undefi
     const parsed = JSON.parse(jsonText) as unknown;
     const candidate = Array.isArray(parsed) ? parsed[0] : parsed;
     return PlannedToolCallSchema.parse(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseAgentPlannerResponse(
+  text: string
+): z.infer<typeof AgentFinalStepSchema> | z.infer<typeof AgentClarificationStepSchema> | z.infer<typeof AgentToolStepSchema> | undefined {
+  const jsonText = extractJsonObject(text);
+  if (!jsonText) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText) as unknown;
+    const candidate = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (!candidate || typeof candidate !== "object") {
+      return undefined;
+    }
+
+    const kind = (candidate as { kind?: unknown }).kind;
+    if (kind === "final") {
+      return AgentFinalStepSchema.parse(candidate);
+    }
+    if (kind === "clarification") {
+      return AgentClarificationStepSchema.parse(candidate);
+    }
+
+    return AgentToolStepSchema.parse({ kind: "tool", ...(candidate as Record<string, unknown>) });
   } catch {
     return undefined;
   }
@@ -241,6 +391,35 @@ export function validatePlannedToolCall(
   };
 }
 
+export function validateAgentNextStep(
+  step:
+    | z.infer<typeof AgentFinalStepSchema>
+    | z.infer<typeof AgentClarificationStepSchema>
+    | z.infer<typeof AgentToolStepSchema>,
+  context: { message?: string; conversationContext?: PlannerConversationMessage[] } = {}
+): AgentNextStepPlanningResult {
+  if (step.kind === "final") {
+    return {
+      kind: "final",
+      message: step.message
+    };
+  }
+
+  if (step.kind === "clarification") {
+    return {
+      kind: "clarification",
+      message: step.message,
+      missingFields: step.missingFields
+    };
+  }
+
+  const validated = validatePlannedToolCall(step, context);
+  if (validated.kind === "tool") {
+    return { ...validated, plannedBy: "model" };
+  }
+  return validated;
+}
+
 function fallbackPlanning(message: string): ToolPlanningResult {
   const fallback = inferToolIntent(message);
   if (!fallback) {
@@ -259,8 +438,23 @@ function fallbackPlanning(message: string): ToolPlanningResult {
   return validated.kind === "tool" ? { ...validated, plannedBy: "fallback" } : validated;
 }
 
-function attachTrace<T extends ToolPlanningResult>(result: T, trace: ToolPlanningTrace): T {
+function attachTrace<T extends { kind: string }>(result: T, trace: ToolPlanningTrace): T & { trace: ToolPlanningTrace } {
   return { ...result, trace };
+}
+
+function finalFromObservations(observations: AgentToolObservation[]): AgentNextStepPlanningResult {
+  const executed = observations.filter((observation) => observation.status === "executed");
+  if (executed.length === 0) {
+    return {
+      kind: "final",
+      message: observations.at(-1)?.notification ?? "I could not complete the requested tool workflow."
+    };
+  }
+
+  return {
+    kind: "final",
+    message: executed.map((observation) => observation.notification).join("\n\n")
+  };
 }
 
 function buildPlannerPrompt(
@@ -282,6 +476,9 @@ ${buildPlannerDateContext(timeZone)}
 
 Rules:
 - Pick one tool from the provided tool cards, or set needsClarification=true if required details are missing.
+- When needsClarification=true, write clarificationQuestion as one direct, friendly question the user can answer in one sentence.
+- The clarificationQuestion must name the missing information in plain language, not schema names. Example: "What date range should I check on your calendar?"
+- Ask only for details required to continue safely; do not ask about optional fields unless the user explicitly requested them.
 - If the current request answers a prior assistant clarification for a pending tool, carry forward the prior details and fill the missing args.
 - Existing details from the conversation carry forward unless the user clearly changes them.
 - Fill all required args exactly as the schema requires.
@@ -314,6 +511,93 @@ ${contextBlock || "(none)"}
 
 User request:
 ${message}`;
+}
+
+function buildAgentPlannerPrompt(
+  goal: string,
+  toolCards: ModelToolCard[],
+  input: {
+    conversationContext?: PlannerConversationMessage[];
+    observations: AgentToolObservation[];
+    remainingSteps: number;
+    remainingToolCalls: number;
+  }
+): string {
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const contextBlock = (input.conversationContext ?? [])
+    .slice(-8)
+    .map((entry) => `${entry.actor}${entry.createdAt ? ` at ${entry.createdAt}` : ""}: ${entry.content}`)
+    .join("\n");
+  const observationBlock =
+    input.observations.length > 0
+      ? JSON.stringify(
+          input.observations.map((observation) => ({
+            stepIndex: observation.stepIndex,
+            toolName: observation.toolName,
+            status: observation.status,
+            notification: observation.notification,
+            data: observation.data
+          })),
+          null,
+          2
+        )
+      : "(none)";
+
+  return `You are a bounded multi-step tool planner. Decide exactly one next step toward the user's goal.
+
+Return JSON only. Do not use markdown.
+
+${buildPlannerDateContext(timeZone)}
+
+Rules:
+- Choose kind="tool" when another tool result is required to satisfy the goal.
+- Choose kind="final" when the observations are sufficient to answer the user.
+- Choose kind="clarification" when a required detail is missing or a safe action cannot be planned.
+- Never invent tool outputs. Use only the observations shown below.
+- Do not repeat a tool call unless the previous result failed and retrying with changed args is useful.
+- Respect the remaining budgets: ${input.remainingSteps} planner steps and ${input.remainingToolCalls} tool calls.
+- For write actions, include assumptions so the app can show them before execution.
+- For Gmail drafts, write a polished subject and body. Sign with "Best,\\nNick" unless requested otherwise.
+- Use ISO-8601 datetimes with timezone offsets for fields named startIso, endIso, timeMin, or timeMax.
+
+Output shapes:
+Tool:
+{
+  "kind": "tool",
+  "intent": "short intent name",
+  "toolName": "one tool name",
+  "args": {},
+  "confidence": 0.0,
+  "assumptions": [],
+  "missingFields": [],
+  "needsClarification": false,
+  "clarificationQuestion": ""
+}
+
+Clarification:
+{
+  "kind": "clarification",
+  "message": "one direct question",
+  "missingFields": []
+}
+
+Final:
+{
+  "kind": "final",
+  "message": "answer grounded in observations"
+}
+
+Tool cards:
+${JSON.stringify(toolCards, null, 2)}
+
+Conversation context:
+${contextBlock || "(none)"}
+
+Tool observations:
+${observationBlock}
+
+User goal:
+${goal}`;
 }
 
 function buildPlannerDateContext(timeZone: string): string {
@@ -555,7 +839,7 @@ function clarificationForMissingFields(plan: PlannedToolCall): string {
     return plan.clarificationQuestion;
   }
 
-  return `I need more information before using ${plan.toolName}: ${plan.missingFields.join(", ")}.`;
+  return `What ${humanReadableMissingFields(plan.missingFields)} should I use before I continue with ${humanReadableToolName(plan.toolName)}?`;
 }
 
 function clarificationForZodError(prompts: Record<string, string>, error: z.ZodError): string {
@@ -565,4 +849,32 @@ function clarificationForZodError(prompts: Record<string, string>, error: z.ZodE
   }
 
   return "I need a little more detail before I can use that tool safely.";
+}
+
+function humanReadableMissingFields(fields: string[]): string {
+  if (fields.length === 0) {
+    return "missing detail";
+  }
+
+  return fields.map(humanReadableFieldName).join(fields.length === 2 ? " and " : ", ");
+}
+
+function humanReadableFieldName(field: string): string {
+  return field
+    .replace(/Iso$/i, "")
+    .replace(/Id$/i, "")
+    .replace(/([A-Z])/g, " $1")
+    .replace(/[_-]+/g, " ")
+    .toLowerCase()
+    .trim();
+}
+
+function humanReadableToolName(toolName: string): string {
+  return toolName
+    .replace(/^google\./, "")
+    .replace(/[._-]+/g, " ")
+    .replace(/\bread schedule\b/i, "checking your calendar")
+    .replace(/\bcreate event\b/i, "creating the calendar event")
+    .replace(/\bcreate draft\b/i, "drafting the email")
+    .replace(/\bsend draft\b/i, "sending the draft");
 }

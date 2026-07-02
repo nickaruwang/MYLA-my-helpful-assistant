@@ -1,4 +1,4 @@
-import { listTools } from "@myla/tools";
+import { listTools, type ToolDefinition } from "@myla/tools";
 
 export interface InferredToolIntent {
   toolName: string;
@@ -6,7 +6,8 @@ export interface InferredToolIntent {
 }
 
 export function inferToolIntent(message: string): InferredToolIntent | undefined {
-  const tools = new Set(listTools().map((tool) => tool.name));
+  const registeredTools = listTools();
+  const tools = new Set(registeredTools.map((tool) => tool.name));
   const lower = message.toLowerCase();
 
   const candidate = [
@@ -20,6 +21,7 @@ export function inferToolIntent(message: string): InferredToolIntent | undefined
     toolIntent(tools, message, "google.calendar.read_schedule", /\b(calendar|schedule|agenda|meetings?)\b/i, {
       query: message
     }),
+    inferPushcutShortcutIntent(message, registeredTools),
     toolIntent(tools, message, "google.gmail.create_draft", /\b(draft|gmail draft|email draft|write an email)\b/i, {
       query: message,
       to: extractEmail(message),
@@ -60,6 +62,86 @@ function toolIntent(
   }
 
   return { toolName, args };
+}
+
+function inferPushcutShortcutIntent(message: string, registeredTools: ToolDefinition[]): InferredToolIntent | undefined {
+  const lower = message.toLowerCase();
+  const mentionsPushcutChannel = /\b(pushcut|shortcut|shortcuts|iphone|ios|imessage|sms|text)\b/i.test(message);
+
+  const candidates = registeredTools
+    .filter((tool) => tool.provider === "pushcut")
+    .map((tool) => ({ tool, score: pushcutRelevanceScore(tool, lower) }))
+    .sort((left, right) => right.score - left.score);
+  const selected = candidates.find((candidate) => candidate.score > 0)?.tool ?? candidates[0]?.tool;
+  const selectedScore = candidates.find((candidate) => candidate.tool === selected)?.score ?? 0;
+  if (!selected || (!mentionsPushcutChannel && selectedScore < 10)) {
+    return undefined;
+  }
+
+  return {
+    toolName: selected.name,
+    args: inferPushcutArgs(message)
+  };
+}
+
+function pushcutRelevanceScore(tool: ToolDefinition, lower: string): number {
+  const haystack = [tool.name, tool.operation, tool.description].join(" ").toLowerCase();
+  let score = 0;
+  for (const part of tool.name.split(/[._-]+/)) {
+    if (part && lower.includes(part)) {
+      score += 6;
+    }
+  }
+  if (/\b(imessage|sms|text)\b/.test(lower) && /\b(imessage|sms|text|message)\b/.test(haystack)) {
+    score += 12;
+  }
+  if (/\b(shortcut|shortcuts|pushcut|iphone|ios)\b/.test(lower) && /\b(shortcut|pushcut|iphone|ios)\b/.test(haystack)) {
+    score += 8;
+  }
+  if (/\b(lock|unlock)\b/.test(lower) && /\b(lock|unlock)\b/.test(haystack)) {
+    score += 10;
+  }
+  if (/\b(tesla|car|vehicle)\b/.test(lower) && /\b(tesla|car|vehicle)\b/.test(haystack)) {
+    score += 8;
+  }
+
+  return score;
+}
+
+function inferPushcutArgs(message: string): Record<string, unknown> {
+  const args: Record<string, unknown> = { input: message };
+  const textMessage = extractTextMessageParts(message);
+  if (!textMessage) {
+    return args;
+  }
+
+  return {
+    ...args,
+    recipient: textMessage.recipient,
+    to: textMessage.recipient,
+    contact: textMessage.recipient,
+    message: textMessage.message,
+    text: textMessage.message,
+    body: textMessage.message
+  };
+}
+
+function extractTextMessageParts(message: string): { recipient: string; message: string } | undefined {
+  const match =
+    message.match(
+      /\b(?:send\s+(?:an?\s+)?(?:text\s+message|imessage|sms|text|message)\s+to|text|sms|imessage|message)\s+(.+?)\s+(?:that|(?:just\s+)?saying|with|:)\s+(.+)$/i
+    ) ??
+    message.match(/\btell\s+(.+?)\s+that\s+(.+)$/i);
+  const recipient = match?.[1]?.trim();
+  const body = match?.[2]?.trim();
+  if (!recipient || !body) {
+    return undefined;
+  }
+
+  return {
+    recipient,
+    message: body.replace(/^["']|["']$/g, "")
+  };
 }
 
 function stripProviderWords(message: string, words: string[]): string {

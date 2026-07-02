@@ -39,6 +39,23 @@ export const ToolTaskStatusSchema = z.enum([
 ]);
 export type ToolTaskStatus = z.infer<typeof ToolTaskStatusSchema>;
 
+export const AgentRunStatusSchema = z.enum([
+  "running",
+  "waiting_approval",
+  "waiting_input",
+  "completed",
+  "failed",
+  "cancelled",
+  "expired"
+]);
+export type AgentRunStatus = z.infer<typeof AgentRunStatusSchema>;
+
+export const AgentStepKindSchema = z.enum(["planner", "tool", "approval", "clarification", "model", "final"]);
+export type AgentStepKind = z.infer<typeof AgentStepKindSchema>;
+
+export const AgentStepStatusSchema = z.enum(["planned", "running", "waiting_approval", "completed", "failed", "blocked"]);
+export type AgentStepStatus = z.infer<typeof AgentStepStatusSchema>;
+
 export const ProviderStatusSchema = z.object({
   provider: z.string(),
   status: z.enum(["ready", "needs_setup", "disabled", "degraded"]),
@@ -156,6 +173,48 @@ export const ToolTaskSchema = z.object({
 });
 export type ToolTask = z.infer<typeof ToolTaskSchema>;
 
+export const AgentRunSchema = z.object({
+  id: z.string(),
+  sessionId: z.string(),
+  correlationId: z.string(),
+  inputMessageId: z.string(),
+  outputMessageId: z.string().nullable().default(null),
+  status: AgentRunStatusSchema,
+  goal: z.string(),
+  currentStepIndex: z.number().int().min(0).default(0),
+  maxSteps: z.number().int().min(1),
+  maxToolCalls: z.number().int().min(0),
+  toolCallCount: z.number().int().min(0).default(0),
+  waitingApprovalId: z.string().nullable().default(null),
+  waitingTaskId: z.string().nullable().default(null),
+  lastError: z.string().nullable().default(null),
+  startedAt: z.string(),
+  updatedAt: z.string(),
+  finishedAt: z.string().nullable().default(null)
+});
+export type AgentRun = z.infer<typeof AgentRunSchema>;
+
+export const AgentStepSchema = z.object({
+  id: z.string(),
+  runId: z.string(),
+  sessionId: z.string(),
+  correlationId: z.string(),
+  stepIndex: z.number().int().min(0),
+  kind: AgentStepKindSchema,
+  status: AgentStepStatusSchema,
+  input: z.record(z.unknown()).default({}),
+  output: z.record(z.unknown()).default({}),
+  plannerTraceId: z.string().nullable().default(null),
+  proposalId: z.string().nullable().default(null),
+  taskId: z.string().nullable().default(null),
+  approvalId: z.string().nullable().default(null),
+  error: z.string().nullable().default(null),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().nullable().default(null)
+});
+export type AgentStep = z.infer<typeof AgentStepSchema>;
+
 export const PlannerTraceSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
@@ -181,7 +240,11 @@ export const AuditEventKindSchema = z.enum([
   "approval.decided",
   "memory.stored",
   "memory.deleted",
-  "audit.verified"
+  "audit.verified",
+  "agent.run.started",
+  "agent.run.paused",
+  "agent.run.completed",
+  "agent.step.completed"
 ]);
 export type AuditEventKind = z.infer<typeof AuditEventKindSchema>;
 

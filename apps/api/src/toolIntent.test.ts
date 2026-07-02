@@ -30,4 +30,49 @@ describe("deterministic tool fallback", () => {
     expect(String(intent?.args.startIso)).toContain("T12:00:00");
     expect(String(intent?.args.endIso)).toContain("T18:00:00");
   });
+
+  it("routes configured text requests to Pushcut shortcuts", () => {
+    process.env.PUSHCUT_API_KEY = "test-token";
+    process.env.PUSHCUT_SHORTCUTS_JSON = JSON.stringify([
+      {
+        name: "send text message",
+        notification: "send msg test",
+        parameters: [
+          { name: "recipient", required: true },
+          { name: "message", required: true }
+        ]
+      }
+    ]);
+    registerDefaultTools();
+
+    const intent = inferToolIntent("send a text message to nick just saying hello");
+
+    expect(intent?.toolName).toBe("pushcut.send_text_message");
+    expect(intent?.args.recipient).toBe("nick");
+    expect(intent?.args.message).toBe("hello");
+
+    delete process.env.PUSHCUT_API_KEY;
+    delete process.env.PUSHCUT_SHORTCUTS_JSON;
+  });
+
+  it("routes configured Tesla lock requests to parameterless Pushcut shortcuts", () => {
+    process.env.PUSHCUT_API_KEY = "test-token";
+    process.env.PUSHCUT_SHORTCUTS_JSON = JSON.stringify([
+      {
+        name: "lock tesla car",
+        notification: "lock tesla car",
+        description: "Lock my Tesla car through a Pushcut-triggered iPhone Shortcut.",
+        parameters: [],
+        bodyMode: "none"
+      }
+    ]);
+    registerDefaultTools();
+
+    const intent = inferToolIntent("lock my tesla car");
+
+    expect(intent?.toolName).toBe("pushcut.lock_tesla_car");
+
+    delete process.env.PUSHCUT_API_KEY;
+    delete process.env.PUSHCUT_SHORTCUTS_JSON;
+  });
 });

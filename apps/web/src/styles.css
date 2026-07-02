@@ -48,6 +48,8 @@ button.secondary {
   border: 1px solid rgba(84, 73, 58, 0.14);
   box-shadow: none;
   color: #4a4350;
+  display: grid;
+  gap: 0.2rem;
   font-weight: 700;
   text-align: left;
 }
@@ -61,6 +63,18 @@ button.selected {
   background: #fffaf3;
   border-color: #c8754d;
   color: #2f2a3a;
+}
+
+.session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.secondary small {
+  color: #9b8e84;
+  font-size: 0.72rem;
+  font-weight: 650;
 }
 
 button.danger {
@@ -293,6 +307,39 @@ input::placeholder {
   padding: 0.95rem;
 }
 
+.clarification-task {
+  background:
+    linear-gradient(135deg, rgba(255, 250, 243, 0.92), rgba(247, 239, 227, 0.9)),
+    radial-gradient(circle at top right, rgba(200, 117, 77, 0.18), transparent 12rem);
+  border-color: rgba(200, 117, 77, 0.34);
+}
+
+.clarification-question {
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(200, 117, 77, 0.16);
+  border-radius: 18px;
+  margin-top: 0.85rem;
+  padding: 0.85rem;
+}
+
+.clarification-question span {
+  color: #9b6d52;
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  margin-bottom: 0.45rem;
+  text-transform: uppercase;
+}
+
+.clarification-question p {
+  color: #352f3b;
+  font-size: 1rem;
+  font-weight: 750;
+  line-height: 1.35;
+  margin: 0;
+}
+
 .message {
   line-height: 1.55;
   max-width: 82%;
@@ -358,6 +405,86 @@ input::placeholder {
 form {
   display: flex;
   gap: 0.75rem;
+}
+
+.chat-composer {
+  align-items: center;
+}
+
+.composer-actions {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.voice-button {
+  background: rgba(255, 250, 243, 0.88);
+  border: 1px solid rgba(84, 73, 58, 0.16);
+  box-shadow: none;
+  color: #4a4350;
+}
+
+.voice-button:hover:not(:disabled) {
+  background: #fffaf3;
+  box-shadow: 0 10px 24px rgba(47, 42, 58, 0.08);
+}
+
+.voice-button.listening {
+  background: linear-gradient(135deg, #c8754d, #7467d9);
+  border-color: rgba(200, 117, 77, 0.4);
+  box-shadow: 0 16px 34px rgba(111, 89, 165, 0.22);
+  color: #fffaf3;
+}
+
+.voice-button.unsupported {
+  border-style: dashed;
+}
+
+.voice-cancel {
+  padding-inline: 0.95rem;
+}
+
+.composer-hint {
+  color: #7d746e;
+  font-size: 0.86rem;
+  margin: -0.85rem 0 0;
+}
+
+.composer-hint.active {
+  color: #8a4fbd;
+  font-weight: 750;
+}
+
+.clarification-form {
+  align-items: stretch;
+  background: rgba(255, 255, 255, 0.52);
+  border: 1px solid rgba(84, 73, 58, 0.11);
+  border-radius: 18px;
+  flex-direction: column;
+  margin-top: 0.85rem;
+  padding: 0.75rem;
+}
+
+.clarification-form label {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.clarification-form label span {
+  color: #86604b;
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.clarification-form input {
+  border-radius: 14px;
+  padding: 0.78rem 0.9rem;
+}
+
+.clarification-form button {
+  align-self: flex-start;
+  padding: 0.65rem 0.95rem;
 }
 
 .compact-form {
@@ -486,6 +613,14 @@ form {
   form {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .composer-actions {
+    width: 100%;
+  }
+
+  .composer-actions button {
+    flex: 1;
   }
 
   .message {

@@ -1,0 +1,36 @@
+[
+  {
+    "name": "send_text_message",
+    "notification": "send msg test",
+    "description": "Send a text message through Pushcut.",
+    "parameters": [
+      {
+        "name": "recipient",
+        "description": "Contact name or phone number",
+        "required": true
+      },
+      {
+        "name": "message",
+        "description": "Message text to send",
+        "required": true
+      }
+    ]
+  },
+  {
+    "name": "lock_car",
+    "notification": "Lock Car",
+    "description": "Lock my car through a Pushcut-triggered iPhone Shortcut.",
+    "parameters": [],
+    "bodyMode": "none",
+    "examples": [
+      {
+        "user": "lock my car",
+        "args": {}
+      },
+      {
+        "user": "lock my tesla car",
+        "args": {}
+      }
+    ]
+  }
+]

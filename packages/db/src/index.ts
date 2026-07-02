@@ -3,6 +3,10 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type {
   Actor,
+  AgentRun,
+  AgentRunStatus,
+  AgentStep,
+  AgentStepStatus,
   ApprovalRequest,
   ChatMessage,
   MemoryFact,
@@ -21,6 +25,8 @@ export interface MylaDatabase {
   db: Db;
   sessions: Collection<Session>;
   messages: Collection<ChatMessage>;
+  agentRuns: Collection<AgentRun>;
+  agentSteps: Collection<AgentStep>;
   toolProposals: Collection<ToolCallProposal>;
   toolTasks: Collection<ToolTask>;
   approvals: Collection<ApprovalRequest>;
@@ -55,6 +61,8 @@ export async function openDatabase(uri = getMongoUri(), databaseName = getMongoD
     db,
     sessions: db.collection<Session>("sessions"),
     messages: db.collection<ChatMessage>("messages"),
+    agentRuns: db.collection<AgentRun>("agent_runs"),
+    agentSteps: db.collection<AgentStep>("agent_steps"),
     toolProposals: db.collection<ToolCallProposal>("tool_proposals"),
     toolTasks: db.collection<ToolTask>("tool_tasks"),
     approvals: db.collection<ApprovalRequest>("approvals"),
@@ -71,6 +79,14 @@ export async function migrate(db: MylaDatabase): Promise<void> {
     db.sessions.createIndex({ id: 1 }, { unique: true }),
     db.sessions.createIndex({ updatedAt: -1 }),
     db.messages.createIndex({ sessionId: 1, createdAt: -1 }),
+    db.agentRuns.createIndex({ id: 1 }, { unique: true }),
+    db.agentRuns.createIndex({ sessionId: 1, startedAt: -1 }),
+    db.agentRuns.createIndex({ status: 1, updatedAt: -1 }),
+    db.agentRuns.createIndex({ waitingApprovalId: 1 }),
+    db.agentSteps.createIndex({ id: 1 }, { unique: true }),
+    db.agentSteps.createIndex({ runId: 1, stepIndex: 1 }, { unique: true }),
+    db.agentSteps.createIndex({ proposalId: 1 }),
+    db.agentSteps.createIndex({ approvalId: 1 }),
     db.toolProposals.createIndex({ id: 1 }, { unique: true }),
     db.toolProposals.createIndex({ sessionId: 1, createdAt: -1 }),
     db.toolTasks.createIndex({ id: 1 }, { unique: true }),
@@ -129,6 +145,18 @@ export async function listSessions(db: MylaDatabase, limit = 25): Promise<Sessio
   return db.sessions.find({}, { projection: { _id: 0 } }).sort({ updatedAt: -1 }).limit(limit).toArray();
 }
 
+export async function updateSessionTitleIfEmpty(db: MylaDatabase, sessionId: string, title: string): Promise<void> {
+  const trimmed = title.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  await db.sessions.updateOne(
+    { id: sessionId, $or: [{ title: null }, { title: "" }, { title: { $exists: false } }] },
+    { $set: { title: trimmed.slice(0, 80) } }
+  );
+}
+
 export async function storeMessage(
   db: MylaDatabase,
   input: {
@@ -168,6 +196,154 @@ export async function listMessages(db: MylaDatabase, sessionId: string, limit = 
     correlationId: row.correlationId,
     createdAt: row.createdAt
   }));
+}
+
+export async function createAgentRun(
+  db: MylaDatabase,
+  input: {
+    sessionId: string;
+    correlationId: string;
+    inputMessageId: string;
+    goal: string;
+    maxSteps: number;
+    maxToolCalls: number;
+  }
+): Promise<AgentRun> {
+  const now = nowIso();
+  const run: AgentRun = {
+    id: crypto.randomUUID(),
+    sessionId: input.sessionId,
+    correlationId: input.correlationId,
+    inputMessageId: input.inputMessageId,
+    outputMessageId: null,
+    status: "running",
+    goal: input.goal,
+    currentStepIndex: 0,
+    maxSteps: input.maxSteps,
+    maxToolCalls: input.maxToolCalls,
+    toolCallCount: 0,
+    waitingApprovalId: null,
+    waitingTaskId: null,
+    lastError: null,
+    startedAt: now,
+    updatedAt: now,
+    finishedAt: null
+  };
+  await db.agentRuns.insertOne(run);
+  return run;
+}
+
+export async function getAgentRun(db: MylaDatabase, runId: string): Promise<AgentRun | null> {
+  return db.agentRuns.findOne({ id: runId }, { projection: { _id: 0 } });
+}
+
+export async function getAgentRunByApprovalId(db: MylaDatabase, approvalId: string): Promise<AgentRun | null> {
+  return db.agentRuns.findOne({ waitingApprovalId: approvalId }, { projection: { _id: 0 } });
+}
+
+export async function listAgentRuns(db: MylaDatabase, sessionId?: string, limit = 25): Promise<AgentRun[]> {
+  return db.agentRuns
+    .find(sessionId ? { sessionId } : {}, { projection: { _id: 0 } })
+    .sort({ startedAt: -1 })
+    .limit(limit)
+    .toArray();
+}
+
+export async function updateAgentRun(
+  db: MylaDatabase,
+  runId: string,
+  updates: Partial<Omit<AgentRun, "id" | "sessionId" | "correlationId" | "inputMessageId" | "startedAt" | "updatedAt">>
+): Promise<void> {
+  await db.agentRuns.updateOne({ id: runId }, { $set: { ...updates, updatedAt: nowIso() } });
+}
+
+export async function updateAgentRunStatus(
+  db: MylaDatabase,
+  runId: string,
+  status: AgentRunStatus,
+  updates: Partial<
+    Pick<AgentRun, "outputMessageId" | "waitingApprovalId" | "waitingTaskId" | "lastError" | "finishedAt">
+  > = {}
+): Promise<void> {
+  await updateAgentRun(db, runId, {
+    status,
+    ...updates,
+    ...(status === "completed" || status === "failed" || status === "cancelled" || status === "expired"
+      ? { finishedAt: updates.finishedAt ?? nowIso() }
+      : {})
+  });
+}
+
+export async function appendAgentStep(
+  db: MylaDatabase,
+  input: {
+    runId: string;
+    sessionId: string;
+    correlationId: string;
+    stepIndex: number;
+    kind: AgentStep["kind"];
+    status: AgentStepStatus;
+    input?: Record<string, unknown>;
+    output?: Record<string, unknown>;
+    plannerTraceId?: string | null;
+    proposalId?: string | null;
+    taskId?: string | null;
+    approvalId?: string | null;
+    error?: string | null;
+  }
+): Promise<AgentStep> {
+  const now = nowIso();
+  const step: AgentStep = {
+    id: crypto.randomUUID(),
+    runId: input.runId,
+    sessionId: input.sessionId,
+    correlationId: input.correlationId,
+    stepIndex: input.stepIndex,
+    kind: input.kind,
+    status: input.status,
+    input: input.input ?? {},
+    output: input.output ?? {},
+    plannerTraceId: input.plannerTraceId ?? null,
+    proposalId: input.proposalId ?? null,
+    taskId: input.taskId ?? null,
+    approvalId: input.approvalId ?? null,
+    error: input.error ?? null,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: input.status === "completed" || input.status === "failed" || input.status === "blocked" ? now : null
+  };
+  await db.agentSteps.insertOne(step);
+  await db.agentRuns.updateOne(
+    { id: input.runId },
+    { $set: { currentStepIndex: input.stepIndex + 1, updatedAt: now } }
+  );
+  return step;
+}
+
+export async function updateAgentStep(
+  db: MylaDatabase,
+  stepId: string,
+  updates: Partial<Omit<AgentStep, "id" | "runId" | "sessionId" | "correlationId" | "stepIndex" | "createdAt" | "updatedAt">>
+): Promise<void> {
+  const status = updates.status;
+  await db.agentSteps.updateOne(
+    { id: stepId },
+    {
+      $set: {
+        ...updates,
+        updatedAt: nowIso(),
+        ...(status === "completed" || status === "failed" || status === "blocked" ? { completedAt: nowIso() } : {})
+      }
+    }
+  );
+}
+
+export async function listAgentSteps(db: MylaDatabase, runId: string): Promise<AgentStep[]> {
+  return db.agentSteps.find({ runId }, { projection: { _id: 0 } }).sort({ stepIndex: 1 }).toArray();
+}
+
+export async function getAgentStepByProposalId(db: MylaDatabase, proposalId: string): Promise<AgentStep | null> {
+  return db.agentSteps.findOne({ proposalId }, { projection: { _id: 0 } });
 }
 
 export async function storeToolProposal(db: MylaDatabase, proposal: ToolCallProposal): Promise<void> {
